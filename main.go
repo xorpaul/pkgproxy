@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -88,6 +89,18 @@ func loadConfig(configFile string) {
 
 }
 
+func loggingDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	conn, err := dialer.DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	localAddr := conn.LocalAddr().String()
+	remoteAddr := conn.RemoteAddr().String()
+	olo.Info("Established connection from %s to %s for %s", localAddr, remoteAddr, addr)
+	return conn, nil
+}
+
 func prepare() {
 	var err error
 
@@ -99,9 +112,7 @@ func prepare() {
 	// https://medium.com/@nate510/don-t-use-go-s-default-http-client-4804cb19f779
 	// fixes unresponsive sockets that lead to too many open files errors and service outage
 	var netTransport = &http.Transport{
-		Dial: (&net.Dialer{
-			Timeout: 15 * time.Second,
-		}).Dial,
+		DialContext:         loggingDialContext,
 		TLSHandshakeTimeout: 15 * time.Second,
 	}
 	if len(config.Proxy) > 0 {
@@ -275,9 +286,9 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 
 func GetRemote(requestedURL string) (*http.Response, error) {
 	if len(config.Proxy) > 0 {
-		olo.Info("GETing " + requestedURL + " with proxy " + config.Proxy)
+		olo.Info("GETing %s with proxy %s", requestedURL, config.Proxy)
 	} else {
-		olo.Info("GETing " + requestedURL + " without proxy")
+		olo.Info("GETing %s without proxy", requestedURL)
 	}
 
 	req, err := http.NewRequest("GET", requestedURL, nil)
@@ -293,13 +304,12 @@ func GetRemote(requestedURL string) (*http.Response, error) {
 		return response, err
 	}
 
-	var reader io.Reader
-	reader = response.Body
+	var reader io.Reader = response.Body
 
 	if response.StatusCode == 200 {
 		promCounters["REMOTE_OK"].Inc()
 		duration := time.Since(before).Seconds()
-		olo.Debug("GETing " + requestedURL + " took " + strconv.FormatFloat(duration, 'f', 5, 64) + "s")
+		olo.Debug("GETing %s took %.5fs", requestedURL, duration)
 		err = cache.put(requestedURL, &reader, response.ContentLength)
 		if err != nil {
 			return response, err
