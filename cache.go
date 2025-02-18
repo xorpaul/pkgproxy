@@ -346,7 +346,7 @@ func checkCacheTTL(filePath string, requestedURL string, defaultCacheTTL time.Du
 		_, err := GetRemote(requestedURL)
 		if err != nil {
 			if config.ReturnCacheIfRemoteFails {
-				olo.Info("checking if remote " + requestedURL + " has a different/newer version failed, so provide the cached item as a fallback")
+				olo.Info("checking if remote %s has a different/newer version failed, so provide the cached item as a fallback", requestedURL)
 				return nil
 			} else {
 				return err
