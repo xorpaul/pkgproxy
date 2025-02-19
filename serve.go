@@ -13,9 +13,17 @@ import (
 // serve starts the HTTPS server with the configured SSL key and certificate
 func serveTLS() {
 	// TLS stuff
-	tlsConfig := &tls.Config{}
-	//Use only TLS v1.2
-	tlsConfig.MinVersion = tls.VersionTLS12
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+		},
+	}
 
 	server := &http.Server{
 		Addr:         config.ListenAddress + ":" + strconv.Itoa(config.ListenSSLPort),
