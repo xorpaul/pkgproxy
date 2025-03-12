@@ -295,7 +295,7 @@ func GetRemote(requestedURL string) (*http.Response, error) {
 	if err != nil {
 		olo.Warn("Error creating GET request for %s Error: %s", requestedURL, err.Error())
 	}
-	req.Header.Set("User-Agent", "https://github.com/xorpaul/tinyproxy/")
+	req.Header.Set("User-Agent", "https://github.com/xorpaul/pkgproxy/")
 	req.Header.Set("Connection", "keep-alive")
 
 	before := time.Now()
