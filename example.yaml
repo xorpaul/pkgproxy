@@ -13,7 +13,6 @@ ssl_private_key: ./ssl/service.key
 ssl_certificate_file: ./ssl/service.pem
 cache_folder: ./cache/
 cache_folder_https: ./cache_https/
-debug_logging: true
 max_cache_item_size_in_mb: 5
 default_cache_ttl: 4s
 prefill_cache_on_startup: true

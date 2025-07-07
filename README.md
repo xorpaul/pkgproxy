@@ -18,8 +18,13 @@ All the configuration is done in a YAML config file:
 
 | Property | Type | Description |
 |:---|:---|:---|
-| `port` | `string` | The port this server is listening to. |
+| `listen_address` | `string` | Address (default 0.0.0.0) to listen for requests. |
+| `listen_port` | `string` | The port this server is listening to for http (0 disables). |
+| `listen_ssl_port` | `string` | The port this server is listening to for https (0 disables). |
+| `ssl_private_key` | `string` | File with SSL key to use on SSL port. |
+| `ssl_certificate_file` | `string` | File with SSL certificate to use on SSL port. |
 | `cache_folder` | `string` | The folder where the cache files are stored. This folder must exist and must be writable. |
+| `local_root` | `string` | Local folder to serve as /local/... |
 | `debug` | `bool` | When set to true, more detailed log output is printed. |
 | `max_cache_item_size_in_mb` | `int` | Maximum size in MB for the in-memory cache. Larger files are only read from disk, smaller files are delivered directly from the memory. |
 | `caching_rules` | `map[string]CachingRules` | Can contain regex patterns for which cache rules can be specified, see details. |

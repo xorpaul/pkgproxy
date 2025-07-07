@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -62,21 +63,28 @@ func main() {
 	}
 	olo.Debug("Config loaded")
 
+	if config.ListenPort == 0 && config.ListenSSLPort == 0 {
+		olo.Fatal("Both listen_port and list_ssl_port set to 0, need to enable at least one")
+	}
+
 	prepare()
 	olo.Debug("Cache initialized")
 
-	go serve()
-	if config.NoSSL {
-		olo.Info("Not starting HTTPS server as no_ssl is set to true")
-	} else {
-		go serveTLS()
+	if config.ListenPort > 0 {
+		go serve()
+	}
+	if config.ListenSSLPort > 0 {
+		if config.NoSSL {
+			olo.Info("Not starting HTTPS server as no_ssl is set to true")
+		} else {
+			go serveTLS()
+		}
 	}
 
 	// prometheus metrics server
 	http.Handle("/metrics", promhttp.Handler())
-	http.ListenAndServe("127.0.0.1:2112", nil)
 	olo.Info("Listening on http://127.0.0.1:2112/metrics")
-
+	olo.Fatal(http.ListenAndServe("127.0.0.1:8082", nil).Error())
 }
 
 func loadConfig(configFile string) {
@@ -231,6 +239,36 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		handleError(nil, err, w)
 		return
 	}
+	// Override destination protocol based on host prefix (http:... or https:...)
+	// and serve /local/<path>/<file> from local directory (local_root)
+	switch {
+	case strings.HasPrefix(cacheURL, "https:"):
+		protocol = "https://"
+		cacheURL = strings.TrimPrefix(cacheURL, "https:")
+	case strings.HasPrefix(cacheURL, "http:"):
+		protocol = "http://"
+		cacheURL = strings.TrimPrefix(cacheURL, "http:")
+	case strings.HasPrefix(cacheURL, "local/"):
+		if config.LocalRoot == "" {
+			olo.Error("Local fileserving not configured for %s", cacheURL)
+			http.Error(w, "Local fileserving not configured", http.StatusForbidden)
+			return
+		}
+		//localfile := config.LocalRoot + strings.TrimPrefix(cacheURL, "local")
+		elements := append([]string{config.LocalRoot}, strings.Split(strings.TrimPrefix(cacheURL, "local"), "/")...)
+		localfile := filepath.Join(elements...)
+		olo.Info("Local fileserving: %s from %s", cacheURL, localfile)
+
+		_, err := os.Stat(localfile)
+		if err != nil {
+			olo.Error("Local file '%s' not found for request to '%s'", localfile, cacheURL)
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+		http.ServeFile(w, r, localfile)
+		return
+	}
+
 	fullUrl := protocol + cacheURL
 	olo.Info("Full incoming request for '%s' from '%s'", fullUrl, requesterIP)
 

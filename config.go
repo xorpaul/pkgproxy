@@ -29,6 +29,7 @@ type Config struct {
 	Proxy                      string                  `yaml:"proxy"`
 	ProxyURL                   *url.URL                `yaml:"proxyURL"`
 	PrefillCacheOnStartup      bool                    `yaml:"prefill_cache_on_startup"`
+	LocalRoot                  string                  `yaml:"local_root"`
 	CacheFolder                string                  `yaml:"cache_folder"`
 	CacheFolderHTTPS           string                  `yaml:"cache_folder_https"`
 	DefaultCacheTTLString      string                  `yaml:"default_cache_ttl"`
@@ -54,7 +55,7 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	var config Config
-	err = yaml.Unmarshal(file, &config)
+	err = yaml.UnmarshalStrict(file, &config)
 
 	if err != nil {
 		return nil, err
