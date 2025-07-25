@@ -14,7 +14,7 @@ import (
 )
 
 func handleError(response *http.Response, err error, w http.ResponseWriter) {
-	olo.Error(err.Error())
+	olo.Error("%s", err.Error())
 	if response != nil {
 		w.WriteHeader(response.StatusCode)
 		bodyBytes, err := io.ReadAll(response.Body)

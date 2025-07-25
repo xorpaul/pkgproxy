@@ -54,7 +54,7 @@ func serve() {
 	olo.Info("Listening on http://%s:%d/", config.ListenAddress, config.ListenPort)
 	err := server.ListenAndServe()
 	if err != nil {
-		olo.Fatal(err.Error())
+		olo.Fatal("%s", err.Error())
 	}
 
 }

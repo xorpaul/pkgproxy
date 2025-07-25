@@ -112,9 +112,9 @@ func CreateCache() (*Cache, error) {
 	}
 
 	channel := make(chan error)
-	olo.Debug("filepath.Walk'ing directory " + cacheFolder)
+	olo.Debug("filepath.Walk'ing directory %s", cacheFolder)
 	go func() { channel <- filepath.WalkDir(cacheFolder, prefillCache) }()
-	olo.Debug("filepath.Walk'ing directory " + CacheFolderHTTPS)
+	olo.Debug("filepath.Walk'ing directory %s", CacheFolderHTTPS)
 	go func() { channel <- filepath.WalkDir(CacheFolderHTTPS, prefillCache) }()
 	<-channel // Walk done
 
