@@ -16,17 +16,19 @@ cache_folder_https: ./cache_https/
 max_cache_item_size_in_mb: 5
 default_cache_ttl: 4s
 prefill_cache_on_startup: true
+listen_address_prometheus: 127.0.0.1
+listen_port_prometheus: 2112
 service_default_cache_ttl:
-  'localhost:8080':
-    regex: '^localhost:8080$'
+  "localhost:8080":
+    regex: "^localhost:8080$"
     ttl: 3s
-  'localhost:8443':
-    regex: '^localhost:8443$'
+  "localhost:8443":
+    regex: "^localhost:8443$"
     ttl: 5s
 caching_rules:
   Debian Packages:
-      regex: '.*\.deb$'
-      ttl: 8544h # 1 year
+    regex: '.*\.deb$'
+    ttl: 8544h # 1 year
   RPM Packages:
-      regex: '.*\.rpm$'
-      ttl: 8544h # 1 year
+    regex: '.*\.rpm$'
+    ttl: 8544h # 1 year
