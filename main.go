@@ -83,8 +83,21 @@ func main() {
 
 	// prometheus metrics server
 	http.Handle("/metrics", promhttp.Handler())
-	olo.Info("Listening on http://127.0.0.1:2112/metrics")
-	olo.Fatal(http.ListenAndServe("127.0.0.1:8082", nil).Error())
+
+	// Set default values if not configured
+	prometheusAddress := config.ListenAddressPrometheus
+	if prometheusAddress == "" {
+		prometheusAddress = "127.0.0.1"
+	}
+	prometheusPort := config.ListenPortPrometheus
+	if prometheusPort == 0 {
+		prometheusPort = 2112
+	}
+
+	prometheusListenAddr := fmt.Sprintf("%s:%d", prometheusAddress, prometheusPort)
+	olo.Info("Listening on http://%s/metrics", prometheusListenAddr)
+	err := http.ListenAndServe(prometheusListenAddr, nil)
+	olo.Fatal("Error starting metrics server: %s", err.Error())
 }
 
 func loadConfig(configFile string) {

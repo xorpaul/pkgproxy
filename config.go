@@ -39,6 +39,8 @@ type Config struct {
 	CacheRules                 map[string]CachingRules `yaml:"caching_rules"`
 	ReturnCacheIfRemoteFails   bool                    `yaml:"return_cache_if_remote_fails"`
 	PrometheusMetricPrefix     string                  `yaml:"prometheus_metric_prefix"`
+	ListenAddressPrometheus    string                  `yaml:"listen_address_prometheus"`
+	ListenPortPrometheus       int                     `yaml:"listen_port_prometheus"`
 }
 
 type CachingRules struct {

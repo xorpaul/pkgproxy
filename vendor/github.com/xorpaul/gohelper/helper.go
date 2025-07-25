@@ -20,6 +20,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/kballard/go-shellquote"
+	"golang.org/x/term"
 )
 
 var (
@@ -345,4 +346,35 @@ func DetectBrowserOrCLI(request *http.Request) string {
 		}
 	}
 	return mode
+}
+
+// Colorize returns the string wrapped in ANSI color codes if stdout is a terminal.
+// Supported colors: "yellow", "green", "red", "orange", "blue", "magenta", "cyan", "white".
+// If the color is not recognized, it returns the string without any color codes.
+func Colorize(s, color string) string {
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return s
+	}
+	var code string
+	switch color {
+	case "yellow":
+		code = "\033[33m"
+	case "green":
+		code = "\033[32m"
+	case "red":
+		code = "\033[31m"
+	case "orange":
+		code = "\033[38;5;208m"
+	case "blue":
+		code = "\033[34m"
+	case "magenta":
+		code = "\033[35m"
+	case "cyan":
+		code = "\033[36m"
+	case "white":
+		code = "\033[37m"
+	default:
+		code = ""
+	}
+	return code + s + "\033[0m"
 }

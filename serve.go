@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/tls"
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -34,11 +33,10 @@ func serveTLS() {
 		Handler:      http.HandlerFunc(handleGet),
 	}
 
-	olo.Info(fmt.Sprintf("Listening on https://%s:%d/", config.ListenAddress, config.ListenSSLPort))
+	olo.Info("Listening on https://%s:%d/", config.ListenAddress, config.ListenSSLPort)
 	err := server.ListenAndServeTLS(config.CertificateFile, config.PrivateKey)
 	if err != nil {
-		m := "Error while trying to serve HTTPS with ssl_certificate_file " + config.CertificateFile + " and ssl_private_key " + config.PrivateKey + " " + err.Error()
-		olo.Fatal(m)
+		olo.Fatal("Error while trying to serve HTTPS with ssl_certificate_file %s and ssl_private_key %s %s", config.CertificateFile, config.PrivateKey, err.Error())
 	}
 }
 
@@ -53,7 +51,7 @@ func serve() {
 		Handler:      http.HandlerFunc(handleGet),
 	}
 
-	olo.Info(fmt.Sprintf("Listening on http://%s:%d/", config.ListenAddress, config.ListenPort))
+	olo.Info("Listening on http://%s:%d/", config.ListenAddress, config.ListenPort)
 	err := server.ListenAndServe()
 	if err != nil {
 		olo.Fatal(err.Error())

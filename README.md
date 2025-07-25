@@ -5,6 +5,7 @@ Simple HTTP(S) caching proxy.
 Main use case is to cache remote package repositories.
 
 # Installation
+
 Just clone this repo and run it:
 
 ```
@@ -14,22 +15,25 @@ go run *.go
 ```
 
 # Configuration
+
 All the configuration is done in a YAML config file:
 
-| Property | Type | Description |
-|:---|:---|:---|
-| `listen_address` | `string` | Address (default 0.0.0.0) to listen for requests. |
-| `listen_port` | `string` | The port this server is listening to for http (0 disables). |
-| `listen_ssl_port` | `string` | The port this server is listening to for https (0 disables). |
-| `ssl_private_key` | `string` | File with SSL key to use on SSL port. |
-| `ssl_certificate_file` | `string` | File with SSL certificate to use on SSL port. |
-| `cache_folder` | `string` | The folder where the cache files are stored. This folder must exist and must be writable. |
-| `local_root` | `string` | Local folder to serve as /local/... |
-| `debug` | `bool` | When set to true, more detailed log output is printed. |
-| `max_cache_item_size_in_mb` | `int` | Maximum size in MB for the in-memory cache. Larger files are only read from disk, smaller files are delivered directly from the memory. |
-| `caching_rules` | `map[string]CachingRules` | Can contain regex patterns for which cache rules can be specified, see details. |
-| `default_cache_ttl` | `time.Duration as string` | Default time duration to cache responses for everything else not matching a particular CachingRules regex from `caching_rules` |
-| `return_cache_if_remote_fails` | `bool` | When the cache TTL expired of a requested URL and the upstream/remote does not serve the requested file anymore, we will serve the last cached version anyway, if this is set to true. Default is false |
+| Property                       | Type                      | Description                                                                                                                                                                                             |
+| :----------------------------- | :------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `listen_address`               | `string`                  | Address (default 0.0.0.0) to listen for requests.                                                                                                                                                       |
+| `listen_port`                  | `string`                  | The port this server is listening to for http (0 disables).                                                                                                                                             |
+| `listen_ssl_port`              | `string`                  | The port this server is listening to for https (0 disables).                                                                                                                                            |
+| `ssl_private_key`              | `string`                  | File with SSL key to use on SSL port.                                                                                                                                                                   |
+| `ssl_certificate_file`         | `string`                  | File with SSL certificate to use on SSL port.                                                                                                                                                           |
+| `cache_folder`                 | `string`                  | The folder where the cache files are stored. This folder must exist and must be writable.                                                                                                               |
+| `local_root`                   | `string`                  | Local folder to serve as /local/...                                                                                                                                                                     |
+| `debug`                        | `bool`                    | When set to true, more detailed log output is printed.                                                                                                                                                  |
+| `max_cache_item_size_in_mb`    | `int`                     | Maximum size in MB for the in-memory cache. Larger files are only read from disk, smaller files are delivered directly from the memory.                                                                 |
+| `caching_rules`                | `map[string]CachingRules` | Can contain regex patterns for which cache rules can be specified, see details.                                                                                                                         |
+| `default_cache_ttl`            | `time.Duration as string` | Default time duration to cache responses for everything else not matching a particular CachingRules regex from `caching_rules`                                                                          |
+| `return_cache_if_remote_fails` | `bool`                    | When the cache TTL expired of a requested URL and the upstream/remote does not serve the requested file anymore, we will serve the last cached version anyway, if this is set to true. Default is false |
+| `listen_address_prometheus`    | `string`                  | Address for Prometheus metrics server (default 127.0.0.1).                                                                                                                                              |
+| `listen_port_prometheus`       | `int`                     | Port for Prometheus metrics server (default 2112).                                                                                                                                                      |
 
 # Config example
 
@@ -49,6 +53,8 @@ cache_folder: ./cache/
 debug_logging: true
 max_cache_item_size_in_mb: 2
 default_cache_ttl: 30m
+listen_address_prometheus: 127.0.0.1
+listen_port_prometheus: 2112
 caching_rules:
   Debian Packages:
       regex: '.*\.deb$'
@@ -58,20 +64,33 @@ caching_rules:
       ttl: 8544h # 1 year
 ```
 
+# Prometheus Metrics
+
+The application exposes Prometheus metrics at `/metrics` endpoint. By default, the metrics server listens on `127.0.0.1:2112`. You can configure the address and port using:
+
+- `listen_address_prometheus`: IP address for the metrics server (default: 127.0.0.1)
+- `listen_port_prometheus`: Port for the metrics server (default: 2112)
+
+The metrics endpoint provides information about cache hits/misses, request counts, remote errors, and other operational metrics.
+
 # Usage example for package repositories:
+
 Original (direct)
 
 ```
 # cat /etc/apt/sources.list.d/puppet7.list
 deb http://apt.puppetlabs.com stretch puppet7
 ```
+
 With caching proxy:
 
 ```
 # cat /etc/apt/sources.list.d/puppet7-proxy.list
 deb http://YOURSERVICEURL/apt.puppetlabs.com stretch puppet7
 ```
+
 Example for YUM repository:
+
 ```
 # cat /etc/yum.repos.d/puppet7-proxy.repo
 [puppet7]
@@ -88,9 +107,10 @@ If you need HTTPS communication than you just need to use the caching proxy with
 # cat /etc/apt/sources.list.d/puppet7-proxy-with-ssl.list
 deb https://YOURSERVICEURL/apt.puppetlabs.com stretch puppet7
 ```
+
 Then the caching proxy will request and cache from https://apt.puppetlabs.com
 
-With the example config from above the *.deb and *.rpm files will be only requested once from remote and then cached for 1 year.
+With the example config from above the _.deb and _.rpm files will be only requested once from remote and then cached for 1 year.
 This means only after 1 year of the last request will the proxy refresh the cached item.
 
 For everything else the default cache TTL will be 30 minutes, which means the repository metadata files (e.g. Packages, repomd.xml, ...) will be at most 30 minutes older than the upstream file.
