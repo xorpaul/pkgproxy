@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 
 	olo "github.com/xorpaul/sigolo"
@@ -34,17 +32,6 @@ func removeSchemeFromURL(requestedURL string) (string, error) {
 		return "", fmt.Errorf("unable to remove URL scheme from requested URL '%s'", requestedURL)
 	}
 	return strings.Replace(requestedURL, url.Scheme+"://", "", 1), nil
-}
-
-func ensureDir(fileName string) error {
-	dirName := filepath.Dir(fileName)
-	if _, serr := os.Stat(dirName); serr != nil {
-		merr := os.MkdirAll(dirName, os.ModePerm)
-		if merr != nil {
-			return merr
-		}
-	}
-	return nil
 }
 
 func validateCacheURL(cacheURL string) error {

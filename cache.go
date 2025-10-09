@@ -19,7 +19,6 @@ import (
 )
 
 type Cache struct {
-	folder           string
 	busyItems        map[string]*sync.Mutex
 	cacheMemoryItems map[string]CacheMemoryItem
 	mutex            *sync.Mutex
@@ -152,7 +151,6 @@ func (c *Cache) has(requestedURL string) (*sync.Mutex, bool) {
 	if lock, busy := c.busyItems[requestedURL]; busy {
 		c.mutex.Unlock()
 		lock.Lock()
-		lock.Unlock()
 		c.mutex.Lock()
 	}
 
