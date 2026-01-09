@@ -250,6 +250,14 @@ func (c *Cache) release(requestedURL string, content []byte, loadedAt time.Time)
 	c.mutex.Unlock()
 }
 
+// cancelBusy removes a busy lock without caching the item.
+// The busy lock *must* be unlocked elsewhere!
+func (c *Cache) cancelBusy(requestedURL string) {
+	c.mutex.Lock()
+	delete(c.busyItems, requestedURL)
+	c.mutex.Unlock()
+}
+
 func (c *Cache) put(requestedURL string, content *io.Reader, contentLength int64) error {
 	// make sure cache directories exist
 	cacheFolder := config.CacheFolder
