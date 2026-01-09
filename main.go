@@ -308,8 +308,8 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 			// For PATCH requests, don't download non-cached items
 			// Just return 404 Not Found
 			olo.Info("PATCH request for non-cached item '%s' - returning 404", fullUrl)
-			busy.Unlock()             // Release the lock we acquired from cache.has()
 			cache.cancelBusy(fullUrl) // Remove from busyItems since we won't cache it
+			busy.Unlock()             // Release the lock we acquired from cache.has()
 			http.Error(w, "Cache item not found", http.StatusNotFound)
 			return
 		}
