@@ -302,7 +302,21 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cache miss -> Load data from requested URL and add to cache
+	invalidateCache := false
+	if r.Method == "PATCH" {
+		invalidateCache = true
+	}
+
 	if busy, ok := cache.has(fullUrl); !ok {
+		// Cache item doesn't exist
+		if r.Method == "PATCH" {
+			// For PATCH requests, don't download non-cached items
+			// Just return 404 Not Found
+			olo.Info("PATCH request for non-cached item '%s' - returning 404", fullUrl)
+			busy.Unlock() // Release the lock we acquired from cache.has()
+			http.Error(w, "Cache item not found", http.StatusNotFound)
+			return
+		}
 		olo.Info("CACHE_MISS for requested '%s'", fullUrl)
 		promCounters["CACHE_MISS"].Inc()
 		defer busy.Unlock()
@@ -314,11 +328,9 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	} else {
 		olo.Info("CACHE_HIT for requested '%s'", cacheURL)
 		promCounters["CACHE_HIT"].Inc()
-	}
-
-	invalidateCache := false
-	if r.Method == "PATCH" {
-		invalidateCache = true
+		if r.Method == "PATCH" {
+			olo.Info("PATCH request for cached item '%s' - will invalidate and re-download", fullUrl)
+		}
 	}
 
 	// The cache has definitely the data we want, so get a reader for that
