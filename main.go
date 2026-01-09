@@ -302,11 +302,6 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cache miss -> Load data from requested URL and add to cache
-	invalidateCache := false
-	if r.Method == "PATCH" {
-		invalidateCache = true
-	}
-
 	if busy, ok := cache.has(fullUrl); !ok {
 		// Cache item doesn't exist
 		if r.Method == "PATCH" {
@@ -328,9 +323,12 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	} else {
 		olo.Info("CACHE_HIT for requested '%s'", cacheURL)
 		promCounters["CACHE_HIT"].Inc()
-		if r.Method == "PATCH" {
-			olo.Info("PATCH request for cached item '%s' - will invalidate and re-download", fullUrl)
-		}
+	}
+
+	invalidateCache := false
+	if r.Method == "PATCH" {
+		invalidateCache = true
+		olo.Info("PATCH request for cached item '%s' - will invalidate and re-download", fullUrl)
 	}
 
 	// The cache has definitely the data we want, so get a reader for that
