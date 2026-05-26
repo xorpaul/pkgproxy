@@ -71,7 +71,7 @@ func initTestMetrics() {
 		"CACHE_HIT", "CACHE_MISS", "CACHE_INVALIDATE", "CACHE_TOO_OLD",
 		"CACHE_OK", "CACHE_ITEM_MISSING",
 		"NEGATIVE_CACHE_HIT", "NEGATIVE_CACHE_PUT", "NEGATIVE_CACHE_INVALIDATE",
-		"CACHE_PREFIX_INVALIDATE",
+		"CACHE_PREFIX_INVALIDATE", "CACHE_REVALIDATED",
 	} {
 		promCounters[name] = prometheus.NewCounter(prometheus.CounterOpts{Name: "test_noop"})
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -35,6 +36,49 @@ type CacheResponse struct {
 	content  io.ReadSeeker
 }
 
+// CacheMeta holds HTTP validators (ETag, Last-Modified) from the upstream
+// response. Stored as a JSON sidecar (<cachefile>.meta) and used to issue
+// conditional GETs on the next TTL expiry, avoiding re-downloads when the
+// upstream content has not changed.
+type CacheMeta struct {
+	ETag         string `json:"etag,omitempty"`
+	LastModified string `json:"last_modified,omitempty"`
+}
+
+// cacheFilePath returns the on-disk path pkgproxy would use for requestedURL
+// without creating any directories.
+func cacheFilePath(requestedURL string) (string, error) {
+	cacheFolder := config.CacheFolder
+	if strings.HasPrefix(requestedURL, "https://") {
+		cacheFolder = config.CacheFolderHTTPS
+	}
+	urlParts := strings.SplitN(requestedURL, "/", 4)
+	if len(urlParts) < 4 {
+		return "", fmt.Errorf("invalid URL: %s", requestedURL)
+	}
+	return filepath.Join(cacheFolder, urlParts[2], url.QueryEscape(urlParts[3])), nil
+}
+
+func saveMeta(cacheFile string, meta CacheMeta) error {
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cacheFile+".meta", data, 0644)
+}
+
+func loadMeta(cacheFile string) CacheMeta {
+	data, err := os.ReadFile(cacheFile + ".meta")
+	if err != nil {
+		return CacheMeta{}
+	}
+	var meta CacheMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return CacheMeta{}
+	}
+	return meta
+}
+
 func CreateCache() (*Cache, error) {
 	cacheFolder, err := h.CheckDirAndCreate(config.CacheFolder, "CreateCache HTTP")
 	if err != nil {
@@ -60,6 +104,10 @@ func CreateCache() (*Cache, error) {
 			return err
 		}
 		if d.IsDir() {
+			return nil
+		}
+		// Meta sidecars are not cache items; skip them.
+		if strings.HasSuffix(d.Name(), ".meta") {
 			return nil
 		}
 		olo.Debug("prefill cache with path: %s", path)
@@ -225,6 +273,11 @@ func (c *Cache) get(requestedURL string, defaultCacheTTL time.Duration, invalida
 		return CacheResponse{}, err
 	}
 
+	// Re-read the memory item: checkCacheTTL may have fetched a newer version.
+	c.mutex.Lock()
+	cacheMemoryItem = c.cacheMemoryItems[requestedURL]
+	c.mutex.Unlock()
+
 	// Key is known, but not found in-memory, read from file
 	if cacheMemoryItem.content == nil {
 		olo.Debug("Cache item '%s' is known but is not stored in memory. Reading from file: %s", cacheURL, cacheFile)
@@ -270,6 +323,19 @@ func (c *Cache) get(requestedURL string, defaultCacheTTL time.Duration, invalida
 func (c *Cache) cancelBusy(requestedURL string) {
 	c.mutex.Lock()
 	delete(c.busyItems, requestedURL)
+	c.mutex.Unlock()
+}
+
+// refreshLoadedAt updates the loadedAt timestamp of an in-memory cache entry
+// without changing its content. Called after a 304 revalidation so that
+// http.ServeContent receives a current Last-Modified and future TTL checks
+// see the refreshed time.
+func (c *Cache) refreshLoadedAt(requestedURL string) {
+	c.mutex.Lock()
+	if item, ok := c.cacheMemoryItems[requestedURL]; ok {
+		item.loadedAt = time.Now()
+		c.cacheMemoryItems[requestedURL] = item
+	}
 	c.mutex.Unlock()
 }
 
@@ -376,6 +442,19 @@ func checkCacheTTL(filePath string, requestedURL string, defaultCacheTTL time.Du
 		} else {
 			olo.Info("CACHE_TOO_OLD for requested URL '%s'", requestedURL)
 			promCounters["CACHE_TOO_OLD"].Inc()
+		}
+		// For PATCH (invalidateCache) skip conditional GET so the full body is
+		// always re-downloaded, preserving the explicit invalidation semantics.
+		if !invalidateCache {
+			if handled, err := tryConditionalGet(requestedURL); err != nil {
+				if config.ReturnCacheIfRemoteFails {
+					olo.Info("conditional GET for %s failed, providing cached item as fallback", requestedURL)
+					return nil
+				}
+				return err
+			} else if handled {
+				return nil
+			}
 		}
 		_, err := GetRemote(requestedURL)
 		if err != nil {
@@ -552,6 +631,7 @@ func (c *Cache) invalidateByPrefix(urlPrefix string, patterns []*regexp.Regexp) 
 			olo.Debug("invalidateByPrefix: could not remove %s: %s", item.filePath, err)
 		} else {
 			count++
+			os.Remove(item.filePath + ".meta")
 		}
 	}
 

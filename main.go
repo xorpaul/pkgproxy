@@ -209,6 +209,10 @@ func prepare() {
 		Name: config.PrometheusMetricPrefix + "pkgproxy_cache_prefix_invalidation_total",
 		Help: "The total number of DELETE requests that performed metadata cache invalidation",
 	})
+	promCounters["CACHE_REVALIDATED"] = promauto.NewCounter(prometheus.CounterOpts{
+		Name: config.PrometheusMetricPrefix + "pkgproxy_cache_revalidated_total",
+		Help: "The total number of cache entries revalidated via conditional GET (304 Not Modified)",
+	})
 
 	promSummaries = make(map[string]prometheus.Summary)
 	promSummaries["CACHE_READ_MEMORY"] = promauto.NewSummary(prometheus.SummaryOpts{
@@ -428,6 +432,89 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// tryConditionalGet attempts to revalidate the cached item for requestedURL
+// using HTTP conditional GET (If-None-Match / If-Modified-Since). Returns
+// (true, nil) if the cache was handled (304 kept, or 200 updated). Returns
+// (false, nil) if no validators exist or an unexpected status was received, in
+// which case the caller should fall back to a full GetRemote. Returns
+// (false, err) on transport or caching errors.
+func tryConditionalGet(requestedURL string) (bool, error) {
+	cacheFile, err := cacheFilePath(requestedURL)
+	if err != nil {
+		return false, nil
+	}
+	meta := loadMeta(cacheFile)
+	if meta.ETag == "" && meta.LastModified == "" {
+		return false, nil
+	}
+
+	req, err := http.NewRequest("GET", requestedURL, nil)
+	if err != nil {
+		return false, nil
+	}
+	req.Header.Set("User-Agent", "https://github.com/xorpaul/pkgproxy/")
+	req.Header.Set("Connection", "keep-alive")
+	if meta.ETag != "" {
+		req.Header.Set("If-None-Match", meta.ETag)
+	}
+	if meta.LastModified != "" {
+		req.Header.Set("If-Modified-Since", meta.LastModified)
+	}
+
+	before := time.Now()
+	response, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+
+	switch response.StatusCode {
+	case http.StatusNotModified:
+		olo.Info("CACHE_REVALIDATED (304 Not Modified) for '%s' in %.5fs", requestedURL, time.Since(before).Seconds())
+		promCounters["CACHE_REVALIDATED"].Inc()
+		now := time.Now()
+		if err := os.Chtimes(cacheFile, now, now); err != nil {
+			olo.Warn("tryConditionalGet: could not touch mtime for %s: %s", cacheFile, err)
+		}
+		cache.refreshLoadedAt(requestedURL)
+		// Some servers echo updated validators in 304; keep existing ones when absent.
+		newETag := response.Header.Get("ETag")
+		newLastModified := response.Header.Get("Last-Modified")
+		if newETag == "" {
+			newETag = meta.ETag
+		}
+		if newLastModified == "" {
+			newLastModified = meta.LastModified
+		}
+		if err := saveMeta(cacheFile, CacheMeta{ETag: newETag, LastModified: newLastModified}); err != nil {
+			olo.Warn("tryConditionalGet: could not save meta for %s: %s", requestedURL, err)
+		}
+		return true, nil
+
+	case http.StatusOK:
+		olo.Info("CACHE_CONDITIONAL_UPDATED (200) for '%s' in %.5fs", requestedURL, time.Since(before).Seconds())
+		promCounters["REMOTE_OK"].Inc()
+		var reader io.Reader = response.Body
+		if err := cache.put(requestedURL, &reader, response.ContentLength); err != nil {
+			return false, err
+		}
+		newMeta := CacheMeta{
+			ETag:         response.Header.Get("ETag"),
+			LastModified: response.Header.Get("Last-Modified"),
+		}
+		if newMeta.ETag != "" || newMeta.LastModified != "" {
+			if err := saveMeta(cacheFile, newMeta); err != nil {
+				olo.Warn("tryConditionalGet: could not save meta for %s: %s", requestedURL, err)
+			}
+		}
+		return true, nil
+
+	default:
+		olo.Debug("tryConditionalGet: unexpected status %d for '%s', falling back to full download", response.StatusCode, requestedURL)
+		return false, nil
+	}
+}
+
 func GetRemote(requestedURL string) (*http.Response, error) {
 	if len(config.Proxy) > 0 {
 		olo.Info("GETing %s with proxy %s", requestedURL, config.Proxy)
@@ -457,6 +544,19 @@ func GetRemote(requestedURL string) (*http.Response, error) {
 		err = cache.put(requestedURL, &reader, response.ContentLength)
 		if err != nil {
 			return response, err
+		}
+		// Persist ETag / Last-Modified so future TTL expiries can use
+		// conditional GETs instead of always re-downloading the full body.
+		metaVals := CacheMeta{
+			ETag:         response.Header.Get("ETag"),
+			LastModified: response.Header.Get("Last-Modified"),
+		}
+		if metaVals.ETag != "" || metaVals.LastModified != "" {
+			if cacheFile, ferr := cacheFilePath(requestedURL); ferr == nil {
+				if merr := saveMeta(cacheFile, metaVals); merr != nil {
+					olo.Warn("GetRemote: could not save meta for %s: %s", requestedURL, merr)
+				}
+			}
 		}
 		defer response.Body.Close()
 		return response, nil

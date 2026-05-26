@@ -237,3 +237,155 @@ func TestCreateCachePrefillsBothHTTPAndHTTPS(t *testing.T) {
 		t.Error("HTTPS cache file not indexed by CreateCache")
 	}
 }
+
+// TestConditionalGet304AvoidRedownload verifies that when a cached item's TTL
+// has expired but the upstream returns 304 Not Modified, pkgproxy revalidates
+// the cache without re-downloading the body, resets the cache file mtime, and
+// serves subsequent requests from cache without hitting the backend again.
+func TestConditionalGet304AvoidRedownload(t *testing.T) {
+	const content = "cached-content"
+	const etag = `"revalidate-etag-abc"`
+
+	var lastRequestHeaders http.Header
+	callCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		lastRequestHeaders = r.Header.Clone()
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		w.Write([]byte(content))
+	}))
+	defer backend.Close()
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/conditional-304-test"
+	fullURL := "http://" + hostAndPath
+	path := "/" + hostAndPath
+
+	// Prime the cache.
+	w1 := httptest.NewRecorder()
+	handleGet(w1, httptest.NewRequest("GET", path, nil))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("initial GET: want 200, got %d", w1.Code)
+	}
+	if callCount != 1 {
+		t.Fatalf("initial GET: want 1 backend call, got %d", callCount)
+	}
+
+	// Verify meta sidecar was written with the ETag.
+	cf, err := cacheFilePath(fullURL)
+	if err != nil {
+		t.Fatalf("cacheFilePath: %v", err)
+	}
+	meta := loadMeta(cf)
+	if meta.ETag != etag {
+		t.Errorf("meta ETag after initial GET: want %q, got %q", etag, meta.ETag)
+	}
+
+	// Age the cache file past the default TTL (1h) to force revalidation.
+	stale := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(cf, stale, stale); err != nil {
+		t.Fatalf("os.Chtimes: %v", err)
+	}
+
+	// Second GET: TTL expired, conditional GET should yield 304 — no body re-download.
+	w2 := httptest.NewRecorder()
+	handleGet(w2, httptest.NewRequest("GET", path, nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second GET: want 200, got %d", w2.Code)
+	}
+	if callCount != 2 {
+		t.Fatalf("second GET: want 2 backend calls total, got %d", callCount)
+	}
+	if lastRequestHeaders.Get("If-None-Match") != etag {
+		t.Errorf("second GET: If-None-Match not sent (got %q)", lastRequestHeaders.Get("If-None-Match"))
+	}
+
+	// Cache file mtime should be reset to approximately now.
+	fi, err := os.Stat(cf)
+	if err != nil {
+		t.Fatalf("stat cache file: %v", err)
+	}
+	if time.Since(fi.ModTime()) > 5*time.Second {
+		t.Errorf("cache file mtime not reset after 304 (mtime %v)", fi.ModTime())
+	}
+
+	// Third GET within the fresh TTL: must not hit backend again.
+	w3 := httptest.NewRecorder()
+	handleGet(w3, httptest.NewRequest("GET", path, nil))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("third GET: want 200, got %d", w3.Code)
+	}
+	if callCount != 2 {
+		t.Errorf("third GET: want still 2 backend calls (TTL reset by 304), got %d", callCount)
+	}
+}
+
+// TestConditionalGet200UpdatesCache verifies that when the upstream returns 200
+// on a conditional GET (content changed), pkgproxy updates the cached body and
+// the meta sidecar, and serves the new content on the next request.
+func TestConditionalGet200UpdatesCache(t *testing.T) {
+	const content1 = "original-content"
+	const content2 = "updated-content"
+	const etag1 = `"etag-v1"`
+	const etag2 = `"etag-v2"`
+
+	callCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if r.Header.Get("If-None-Match") == etag1 {
+			// Content changed: send new version with new ETag.
+			w.Header().Set("ETag", etag2)
+			w.Write([]byte(content2))
+			return
+		}
+		w.Header().Set("ETag", etag1)
+		w.Write([]byte(content1))
+	}))
+	defer backend.Close()
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/conditional-200-test"
+	fullURL := "http://" + hostAndPath
+	path := "/" + hostAndPath
+
+	// Prime the cache.
+	w1 := httptest.NewRecorder()
+	handleGet(w1, httptest.NewRequest("GET", path, nil))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("initial GET: want 200, got %d", w1.Code)
+	}
+
+	cf, err := cacheFilePath(fullURL)
+	if err != nil {
+		t.Fatalf("cacheFilePath: %v", err)
+	}
+
+	// Age the cache file to force TTL expiry.
+	stale := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(cf, stale, stale); err != nil {
+		t.Fatalf("os.Chtimes: %v", err)
+	}
+
+	// Second GET: TTL expired, conditional GET returns 200 (content changed).
+	w2 := httptest.NewRecorder()
+	handleGet(w2, httptest.NewRequest("GET", path, nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second GET: want 200, got %d", w2.Code)
+	}
+	if callCount != 2 {
+		t.Fatalf("second GET: want 2 backend calls total, got %d", callCount)
+	}
+
+	body, _ := io.ReadAll(w2.Result().Body)
+	if string(body) != content2 {
+		t.Errorf("second GET body: want %q, got %q", content2, string(body))
+	}
+
+	// Meta sidecar should have the updated ETag.
+	meta := loadMeta(cf)
+	if meta.ETag != etag2 {
+		t.Errorf("meta ETag after update: want %q, got %q", etag2, meta.ETag)
+	}
+}
