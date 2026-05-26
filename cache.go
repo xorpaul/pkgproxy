@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -110,12 +109,13 @@ func CreateCache() (*Cache, error) {
 		return nil
 	}
 
-	channel := make(chan error)
+	channel := make(chan error, 2)
 	olo.Debug("filepath.Walk'ing directory %s", cacheFolder)
 	go func() { channel <- filepath.WalkDir(cacheFolder, prefillCache) }()
 	olo.Debug("filepath.Walk'ing directory %s", CacheFolderHTTPS)
 	go func() { channel <- filepath.WalkDir(CacheFolderHTTPS, prefillCache) }()
-	<-channel // Walk done
+	<-channel
+	<-channel
 
 	if !config.PrefillCacheOnStartup {
 		olo.Info("prefillCache: Not prefilling in-memory cache with content, because prefill_cache_on_startup in config is set to false")
@@ -273,10 +273,14 @@ func (c *Cache) put(requestedURL string, content *io.Reader, contentLength int64
 	if err != nil {
 		return err
 	}
+	defer file.Close()
 
 	writer := bufio.NewWriter(file)
 	written, err := io.Copy(writer, *content)
 	if err != nil {
+		return err
+	}
+	if err = writer.Flush(); err != nil {
 		return err
 	}
 	olo.Debug("Wrote content size %d of entry %s into file %s", written, requestedURL, cacheFile)
@@ -316,9 +320,8 @@ func checkCacheTTL(filePath string, requestedURL string, defaultCacheTTL time.Du
 
 	ttl := defaultCacheTTL
 	for name, cr := range config.CacheRules {
-		r := regexp.MustCompile(cr.Regex)
 		// olo.Debug("comparing regex rule: '%s' with regex '%s' with cacheURL: '%s'", name, cr.Regex, cacheURL)
-		if r.MatchString(requestedURL) {
+		if cr.CompiledRegex.MatchString(requestedURL) {
 			olo.Debug("found matching regex rule: '%s' with regex '%s' and ttl '%s' for requestedURL: '%s'", name, cr.Regex, cr.TTL, requestedURL)
 			ttl = cr.TTL
 			// olo.Debug("setting ttl to '%s' for file '%s'", ttl, cacheURL)
