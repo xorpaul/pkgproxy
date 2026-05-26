@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+
 func mustCompileRegex(s string) *regexp.Regexp {
 	return regexp.MustCompile(s)
 }
@@ -35,13 +36,19 @@ func TestMain(m *testing.M) {
 		log.Fatal(err)
 	}
 
+	compiledMetadataPatterns := make([]*regexp.Regexp, 0, len(defaultMetadataPatternStrings))
+	for _, p := range defaultMetadataPatternStrings {
+		compiledMetadataPatterns = append(compiledMetadataPatterns, regexp.MustCompile(p))
+	}
+
 	config = &Config{
-		CacheFolder:            cacheDir,
-		CacheFolderHTTPS:       cacheHTTPSDir,
-		DefaultCacheTTL:        time.Hour,
-		MaxCacheItemSize:       100,
-		Timeout:                5,
-		PrometheusMetricPrefix: "test_",
+		CacheFolder:              cacheDir,
+		CacheFolderHTTPS:         cacheHTTPSDir,
+		DefaultCacheTTL:          time.Hour,
+		MaxCacheItemSize:         100,
+		Timeout:                  5,
+		PrometheusMetricPrefix:   "test_",
+		CompiledMetadataPatterns: compiledMetadataPatterns,
 	}
 
 	client = &http.Client{Timeout: 5 * time.Second}
@@ -64,6 +71,7 @@ func initTestMetrics() {
 		"CACHE_HIT", "CACHE_MISS", "CACHE_INVALIDATE", "CACHE_TOO_OLD",
 		"CACHE_OK", "CACHE_ITEM_MISSING",
 		"NEGATIVE_CACHE_HIT", "NEGATIVE_CACHE_PUT", "NEGATIVE_CACHE_INVALIDATE",
+		"CACHE_PREFIX_INVALIDATE",
 	} {
 		promCounters[name] = prometheus.NewCounter(prometheus.CounterOpts{Name: "test_noop"})
 	}
@@ -343,6 +351,100 @@ func TestNegativeCacheTTLExpiry(t *testing.T) {
 	handleGet(httptest.NewRecorder(), httptest.NewRequest("GET", "/"+hostAndPath, nil))
 	if hitCount != 2 {
 		t.Errorf("after TTL expiry: want 2 upstream hits, got %d", hitCount)
+	}
+}
+
+// TestDeleteInvalidatesMetadataFiles verifies that a DELETE request removes
+// cached metadata files under the given prefix while leaving package binaries
+// untouched. It also checks the X-Pkgproxy-Invalidated response header.
+func TestDeleteInvalidatesMetadataFiles(t *testing.T) {
+	callCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Write([]byte("content"))
+	}))
+	defer backend.Close()
+
+	host := strings.TrimPrefix(backend.URL, "http://")
+	metaPath := host + "/dists/focal/Packages"
+	pkgPath := host + "/pool/main/p/pkg/pkg_1.0_amd64.deb"
+
+	// Prime the cache with a metadata file and a package file.
+	handleGet(httptest.NewRecorder(), httptest.NewRequest("GET", "/"+metaPath, nil))
+	handleGet(httptest.NewRecorder(), httptest.NewRequest("GET", "/"+pkgPath, nil))
+	if callCount != 2 {
+		t.Fatalf("priming: want 2 backend calls, got %d", callCount)
+	}
+
+	// Verify both are in the memory cache.
+	if _, ok := cache.cacheMemoryItems["http://"+metaPath]; !ok {
+		t.Fatal("metadata file not in cache after GET")
+	}
+	if _, ok := cache.cacheMemoryItems["http://"+pkgPath]; !ok {
+		t.Fatal("package file not in cache after GET")
+	}
+
+	// DELETE the dists/ prefix — should remove Packages but not the .deb.
+	delReq := httptest.NewRequest("DELETE", "/"+host+"/dists/", nil)
+	delW := httptest.NewRecorder()
+	handleGet(delW, delReq)
+
+	delResp := delW.Result()
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE status: want 200, got %d", delResp.StatusCode)
+	}
+	if got := delResp.Header.Get("X-Pkgproxy-Invalidated"); got != "1" {
+		t.Errorf("X-Pkgproxy-Invalidated: want %q, got %q", "1", got)
+	}
+
+	// Metadata file must be gone from memory cache.
+	if _, ok := cache.cacheMemoryItems["http://"+metaPath]; ok {
+		t.Error("metadata file still in memory cache after DELETE")
+	}
+	// Package file must still be cached.
+	if _, ok := cache.cacheMemoryItems["http://"+pkgPath]; !ok {
+		t.Error("package file was incorrectly removed from cache by DELETE")
+	}
+
+	// Next GET for the metadata file must hit backend again (cache miss).
+	handleGet(httptest.NewRecorder(), httptest.NewRequest("GET", "/"+metaPath, nil))
+	if callCount != 3 {
+		t.Errorf("GET after DELETE: want 3 backend calls (re-fetch), got %d", callCount)
+	}
+}
+
+// TestDeleteInvalidatesNegativeCacheEntries verifies that DELETE also clears
+// negative cache (.404) entries for metadata files under the given prefix.
+func TestDeleteInvalidatesNegativeCacheEntries(t *testing.T) {
+	origTTL := config.NegativeCacheTTL
+	config.NegativeCacheTTL = time.Hour
+	defer func() { config.NegativeCacheTTL = origTTL }()
+
+	hitCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCount++
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer backend.Close()
+
+	host := strings.TrimPrefix(backend.URL, "http://")
+	metaPath := host + "/repodata/repomd.xml"
+
+	// Prime the negative cache.
+	handleGet(httptest.NewRecorder(), httptest.NewRequest("GET", "/"+metaPath, nil))
+	if hitCount != 1 {
+		t.Fatalf("prime: want 1 upstream call, got %d", hitCount)
+	}
+	if found, _ := cache.isNotFound("http://" + metaPath); !found {
+		t.Fatal("expected negative cache entry after 404")
+	}
+
+	// DELETE the repodata/ prefix — should clear the negative cache entry.
+	delReq := httptest.NewRequest("DELETE", "/"+host+"/repodata/", nil)
+	handleGet(httptest.NewRecorder(), delReq)
+
+	if found, _ := cache.isNotFound("http://" + metaPath); found {
+		t.Error("negative cache entry still present after DELETE")
 	}
 }
 

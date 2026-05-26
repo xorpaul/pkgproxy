@@ -205,6 +205,10 @@ func prepare() {
 		Name: config.PrometheusMetricPrefix + "pkgproxy_negative_cache_invalidate_total",
 		Help: "The total number of negative cache entries cleared by PATCH requests",
 	})
+	promCounters["CACHE_PREFIX_INVALIDATE"] = promauto.NewCounter(prometheus.CounterOpts{
+		Name: config.PrometheusMetricPrefix + "pkgproxy_cache_prefix_invalidation_total",
+		Help: "The total number of DELETE requests that performed metadata cache invalidation",
+	})
 
 	promSummaries = make(map[string]prometheus.Summary)
 	promSummaries["CACHE_READ_MEMORY"] = promauto.NewSummary(prometheus.SummaryOpts{
@@ -226,7 +230,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	olo.Info("Incoming request '%s' from '%s' on '%s'", r.URL.String(), requesterIP, r.Host)
-	if r.Method != "GET" && r.Method != "HEAD" && r.Method != "PATCH" {
+	if r.Method != "GET" && r.Method != "HEAD" && r.Method != "PATCH" && r.Method != "DELETE" {
 		olo.Warn("Incoming nonGET HTTP request '%s' from '%s' on '%s'", r.URL.Path, requesterIP, r.Host)
 		errorMessage := fmt.Sprintf("HTTP method '%s' other than GET, HEAD or PATCH not allowed for '%s' from '%s' on '%s'", r.Method, r.URL, requesterIP, r.Host)
 		promCounters["TOTAL_HTTP_NONGET_REQUESTS"].Inc()
@@ -254,6 +258,33 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 			olo.Debug("setting default ttl to '%s' for service name '%s'", defaultCacheTTL.String(), r.Host)
 			break
 		}
+	}
+
+	if r.Method == "DELETE" {
+		delURL := strings.TrimLeft(r.URL.String(), "/")
+		if strings.Contains(delURL, "..") {
+			http.Error(w, ".. not allowed in request URL", http.StatusBadRequest)
+			return
+		}
+		switch {
+		case strings.HasPrefix(delURL, "https:"):
+			protocol = "https://"
+			delURL = strings.TrimPrefix(delURL, "https:")
+		case strings.HasPrefix(delURL, "http:"):
+			protocol = "http://"
+			delURL = strings.TrimPrefix(delURL, "http:")
+		}
+		urlPrefix := protocol + delURL
+		count, err := cache.invalidateByPrefix(urlPrefix, config.CompiledMetadataPatterns)
+		if err != nil {
+			handleError(nil, err, w)
+			return
+		}
+		promCounters["CACHE_PREFIX_INVALIDATE"].Inc()
+		olo.Info("DELETE invalidated %d metadata cache entries for prefix '%s' from '%s'", count, urlPrefix, requesterIP)
+		w.Header().Set("X-Pkgproxy-Invalidated", strconv.Itoa(count))
+		fmt.Fprintf(w, "Invalidated %d metadata cache entries for prefix: %s\n", count, urlPrefix)
+		return
 	}
 
 	cacheURL := strings.TrimLeft(r.URL.String(), "/")

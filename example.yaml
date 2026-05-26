@@ -32,6 +32,21 @@ caching_rules:
   RPM Packages:
     regex: '.*\.rpm$'
     ttl: 8544h # 1 year
+# Bulk metadata cache invalidation via HTTP DELETE:
+#   DELETE http://pkgproxy/http://repo.example.com/dists/
+# removes all cached metadata files under that URL prefix (Packages, Release,
+# repomd.xml, etc.) from both positive and negative cache. Package binaries
+# (.deb, .rpm) are left untouched. Use this to fix stale repo metadata in
+# CI/CD pipelines without clearing the entire cache.
+#
+# Override which files are treated as metadata (default covers APT and YUM/DNF):
+#metadata_file_patterns:
+#  - '.*/Packages(\.gz|\.bz2|\.xz)?$'
+#  - '.*/Release(\.gpg)?$'
+#  - '.*/InRelease$'
+#  - '.*/repomd\.xml$'
+#  - '.*/repodata/.*\.xml(\.gz|\.bz2|\.xz)?$'
+
 # Cache 404 responses to avoid hammering upstream with repeated requests for
 # URLs that don't exist (e.g. EOL distro repos, missing translation files).
 # PATCH requests invalidate negative cache entries, same as positive cache.
