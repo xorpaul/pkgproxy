@@ -240,6 +240,14 @@ func (c *Cache) get(requestedURL string, defaultCacheTTL time.Duration, invalida
 
 }
 
+// cancelBusy removes the busy lock for requestedURL without caching the item.
+// The busy lock *must* be unlocked elsewhere!
+func (c *Cache) cancelBusy(requestedURL string) {
+	c.mutex.Lock()
+	delete(c.busyItems, requestedURL)
+	c.mutex.Unlock()
+}
+
 // release is an internal method which atomically caches an item and unmarks
 // the item as busy, if it was busy before. The busy lock *must* be unlocked
 // elsewhere!
