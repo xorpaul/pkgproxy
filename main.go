@@ -193,6 +193,18 @@ func prepare() {
 		Name: config.PrometheusMetricPrefix + "pkgproxy_cache_item_missing_total",
 		Help: "Cache item was known while starting the service, but was removed afterwards, this should really be 0 otherwise something is seriously wrong",
 	})
+	promCounters["NEGATIVE_CACHE_HIT"] = promauto.NewCounter(prometheus.CounterOpts{
+		Name: config.PrometheusMetricPrefix + "pkgproxy_negative_cache_hit_total",
+		Help: "The total number of requests served directly from negative cache (upstream returned 404 previously)",
+	})
+	promCounters["NEGATIVE_CACHE_PUT"] = promauto.NewCounter(prometheus.CounterOpts{
+		Name: config.PrometheusMetricPrefix + "pkgproxy_negative_cache_put_total",
+		Help: "The total number of 404 responses stored in the negative cache",
+	})
+	promCounters["NEGATIVE_CACHE_INVALIDATE"] = promauto.NewCounter(prometheus.CounterOpts{
+		Name: config.PrometheusMetricPrefix + "pkgproxy_negative_cache_invalidate_total",
+		Help: "The total number of negative cache entries cleared by PATCH requests",
+	})
 
 	promSummaries = make(map[string]prometheus.Summary)
 	promSummaries["CACHE_READ_MEMORY"] = promauto.NewSummary(prometheus.SummaryOpts{
@@ -299,6 +311,21 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		promCounters[requestedFQDN].Inc()
 	}
 
+	// PATCH always clears any negative cache entry so the next GET re-fetches upstream.
+	if r.Method == "PATCH" && config.NegativeCacheTTL > 0 && cache.isNotFound(fullUrl) {
+		cache.deleteNotFoundEntry(fullUrl)
+		olo.Info("NEGATIVE_CACHE_INVALIDATE via PATCH for '%s'", fullUrl)
+		promCounters["NEGATIVE_CACHE_INVALIDATE"].Inc()
+	}
+
+	// Fast path: URL is known to return 404, serve from negative cache (skip for PATCH).
+	if r.Method != "PATCH" && config.NegativeCacheTTL > 0 && cache.isNotFound(fullUrl) {
+		olo.Info("NEGATIVE_CACHE_HIT for '%s'", fullUrl)
+		promCounters["NEGATIVE_CACHE_HIT"].Inc()
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+
 	// Cache miss -> Load data from requested URL and add to cache
 	if busy, ok := cache.has(fullUrl); !ok {
 		olo.Info("CACHE_MISS for requested '%s'", fullUrl)
@@ -310,10 +337,30 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Cache item not found", http.StatusNotFound)
 			return
 		}
+		// Re-check after waiting in has() — handles concurrent requests for a
+		// URL that was just 404'd and stored in the negative cache by another goroutine.
+		if config.NegativeCacheTTL > 0 && cache.isNotFound(fullUrl) {
+			cache.cancelBusy(fullUrl)
+			busy.Unlock()
+			olo.Info("NEGATIVE_CACHE_HIT for '%s'", fullUrl)
+			promCounters["NEGATIVE_CACHE_HIT"].Inc()
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
 		defer busy.Unlock()
 		response, err := GetRemote(fullUrl)
 		if err != nil {
-			handleError(response, err, w)
+			cache.cancelBusy(fullUrl)
+			if response != nil && response.StatusCode == http.StatusNotFound && config.NegativeCacheTTL > 0 {
+				if nerr := cache.putNotFound(fullUrl); nerr != nil {
+					olo.Error("putNotFound failed for %s: %s", fullUrl, nerr)
+				}
+				olo.Info("NEGATIVE_CACHE_PUT for '%s'", fullUrl)
+				promCounters["NEGATIVE_CACHE_PUT"].Inc()
+				http.Error(w, "File not found", http.StatusNotFound)
+			} else {
+				handleError(response, err, w)
+			}
 			return
 		}
 	} else {

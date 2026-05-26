@@ -32,3 +32,14 @@ caching_rules:
   RPM Packages:
     regex: '.*\.rpm$'
     ttl: 8544h # 1 year
+# Cache 404 responses to avoid hammering upstream with repeated requests for
+# URLs that don't exist (e.g. EOL distro repos, missing translation files).
+# PATCH requests invalidate negative cache entries, same as positive cache.
+#negative_cache_ttl: 1h
+#negative_caching_rules:
+#  EOL Debian archive:
+#    regex: 'archive\.debian\.org/.*'
+#    ttl: 24h
+#  EOL nginx jessie:
+#    regex: 'nginx\.org/packages/debian/dists/jessie/.*'
+#    ttl: 168h # 1 week
