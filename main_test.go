@@ -201,7 +201,7 @@ func TestHandleGetRemoteNonOKStatus(t *testing.T) {
 
 // TestNegativeCacheStopsUpstreamHits verifies that after a 404 is stored in
 // the negative cache, subsequent requests are served from the cache without
-// contacting upstream.
+// contacting upstream, and that the correct response headers are set.
 func TestNegativeCacheStopsUpstreamHits(t *testing.T) {
 	origTTL := config.NegativeCacheTTL
 	config.NegativeCacheTTL = time.Hour
@@ -217,25 +217,50 @@ func TestNegativeCacheStopsUpstreamHits(t *testing.T) {
 	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/missing-file"
 
 	// First request: cache miss, hits upstream, stores negative cache entry.
+	// Must get X-Pkgproxy-Error and X-Pkgproxy-Cache-Expires.
+	before := time.Now()
 	req1 := httptest.NewRequest("GET", "/"+hostAndPath, nil)
 	w1 := httptest.NewRecorder()
 	handleGet(w1, req1)
-	if w1.Result().StatusCode != http.StatusNotFound {
-		t.Fatalf("first request: want 404, got %d", w1.Result().StatusCode)
+	resp1 := w1.Result()
+	if resp1.StatusCode != http.StatusNotFound {
+		t.Fatalf("first request: want 404, got %d", resp1.StatusCode)
 	}
 	if hitCount != 1 {
 		t.Fatalf("first request: want 1 upstream hit, got %d", hitCount)
 	}
+	if got := resp1.Header.Get("X-Pkgproxy-Error"); got != "remote returned HTTP 404" {
+		t.Errorf("first request X-Pkgproxy-Error: want %q, got %q", "remote returned HTTP 404", got)
+	}
+	expiresStr := resp1.Header.Get("X-Pkgproxy-Cache-Expires")
+	if expiresStr == "" {
+		t.Error("first request: X-Pkgproxy-Cache-Expires header missing")
+	} else {
+		expiry, err := time.Parse(time.RFC3339, expiresStr)
+		if err != nil {
+			t.Errorf("first request: X-Pkgproxy-Cache-Expires not RFC3339: %s", expiresStr)
+		} else if expiry.Before(before.Add(59 * time.Minute)) {
+			t.Errorf("first request: expiry %s is earlier than expected (want ~1h from now)", expiresStr)
+		}
+	}
 
 	// Second request: must be served from negative cache, no upstream hit.
+	// Must get X-Pkgproxy-Negative-Cache: HIT and X-Pkgproxy-Cache-Expires.
 	req2 := httptest.NewRequest("GET", "/"+hostAndPath, nil)
 	w2 := httptest.NewRecorder()
 	handleGet(w2, req2)
-	if w2.Result().StatusCode != http.StatusNotFound {
-		t.Fatalf("second request: want 404, got %d", w2.Result().StatusCode)
+	resp2 := w2.Result()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("second request: want 404, got %d", resp2.StatusCode)
 	}
 	if hitCount != 1 {
 		t.Errorf("second request hit upstream again (want still 1, got %d)", hitCount)
+	}
+	if got := resp2.Header.Get("X-Pkgproxy-Negative-Cache"); got != "HIT" {
+		t.Errorf("second request X-Pkgproxy-Negative-Cache: want %q, got %q", "HIT", got)
+	}
+	if resp2.Header.Get("X-Pkgproxy-Cache-Expires") == "" {
+		t.Error("second request: X-Pkgproxy-Cache-Expires header missing")
 	}
 }
 
@@ -265,7 +290,7 @@ func TestNegativeCachePatchInvalidates(t *testing.T) {
 	if callCount != 1 {
 		t.Fatalf("prime: want 1 upstream call, got %d", callCount)
 	}
-	if !cache.isNotFound("http://" + hostAndPath) {
+	if found, _ := cache.isNotFound("http://" + hostAndPath); !found {
 		t.Fatal("expected negative cache entry after first 404")
 	}
 
@@ -273,7 +298,7 @@ func TestNegativeCachePatchInvalidates(t *testing.T) {
 	reqPatch := httptest.NewRequest("PATCH", "/"+hostAndPath, nil)
 	wPatch := httptest.NewRecorder()
 	handleGet(wPatch, reqPatch)
-	if cache.isNotFound("http://" + hostAndPath) {
+	if found, _ := cache.isNotFound("http://" + hostAndPath); found {
 		t.Error("negative cache entry should be cleared after PATCH")
 	}
 
