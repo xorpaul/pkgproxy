@@ -303,6 +303,13 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	if busy, ok := cache.has(fullUrl); !ok {
 		olo.Info("CACHE_MISS for requested '%s'", fullUrl)
 		promCounters["CACHE_MISS"].Inc()
+		if r.Method == "PATCH" {
+			olo.Info("PATCH request for non-cached item '%s' - returning 404", fullUrl)
+			cache.cancelBusy(fullUrl)
+			busy.Unlock()
+			http.Error(w, "Cache item not found", http.StatusNotFound)
+			return
+		}
 		defer busy.Unlock()
 		response, err := GetRemote(fullUrl)
 		if err != nil {
@@ -314,10 +321,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		promCounters["CACHE_HIT"].Inc()
 	}
 
-	invalidateCache := false
-	if r.Method == "PATCH" {
-		invalidateCache = true
-	}
+	invalidateCache := r.Method == "PATCH"
 
 	// The cache has definitely the data we want, so get a reader for that
 	cacheResponse, err := cache.get(fullUrl, defaultCacheTTL, invalidateCache)
