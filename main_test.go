@@ -448,6 +448,85 @@ func TestDeleteInvalidatesNegativeCacheEntries(t *testing.T) {
 	}
 }
 
+// TestRangeAndContentLength verifies that the proxy sets Content-Length and
+// Accept-Ranges on normal responses, returns 206 Partial Content with correct
+// headers for Range requests, and returns 416 for unsatisfiable ranges.
+// It covers both the in-memory cache path (small file) and the on-disk path
+// (file larger than MaxCacheItemSize that is only served from os.File).
+func TestRangeAndContentLength(t *testing.T) {
+	const content = "0123456789abcdefghij" // 20 bytes
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(content))
+	}))
+	defer backend.Close()
+
+	for _, tc := range []struct {
+		name            string
+		maxCacheItemMB  int64 // controls whether content lands in memory or only on disk
+	}{
+		{"memory-cached", 100},
+		{"disk-only", 0}, // MaxCacheItemSize=0 MB → content never fits in memory
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each sub-test needs an independent cache so items from the other
+			// sub-test don't bleed through.
+			origMax := config.MaxCacheItemSize
+			config.MaxCacheItemSize = tc.maxCacheItemMB
+			defer func() { config.MaxCacheItemSize = origMax }()
+
+			hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/range-test-" + tc.name
+
+			// ── prime the cache ──────────────────────────────────────────────
+			getReq := httptest.NewRequest("GET", "/"+hostAndPath, nil)
+			getW := httptest.NewRecorder()
+			handleGet(getW, getReq)
+			if getW.Result().StatusCode != http.StatusOK {
+				t.Fatalf("initial GET: want 200, got %d", getW.Result().StatusCode)
+			}
+
+			// ── Content-Length and Accept-Ranges on normal GET ───────────────
+			if cl := getW.Result().ContentLength; cl != int64(len(content)) {
+				t.Errorf("Content-Length: want %d, got %d", len(content), cl)
+			}
+			if ar := getW.Result().Header.Get("Accept-Ranges"); ar != "bytes" {
+				t.Errorf("Accept-Ranges: want %q, got %q", "bytes", ar)
+			}
+
+			// ── Range request: bytes 5-14 (10 bytes) ────────────────────────
+			rangeReq := httptest.NewRequest("GET", "/"+hostAndPath, nil)
+			rangeReq.Header.Set("Range", "bytes=5-14")
+			rangeW := httptest.NewRecorder()
+			handleGet(rangeW, rangeReq)
+
+			resp := rangeW.Result()
+			if resp.StatusCode != http.StatusPartialContent {
+				t.Fatalf("Range request: want 206, got %d", resp.StatusCode)
+			}
+			const wantRange = "bytes 5-14/20"
+			if got := resp.Header.Get("Content-Range"); got != wantRange {
+				t.Errorf("Content-Range: want %q, got %q", wantRange, got)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			if string(body) != content[5:15] {
+				t.Errorf("partial body: want %q, got %q", content[5:15], string(body))
+			}
+			if cl := resp.ContentLength; cl != 10 {
+				t.Errorf("Content-Length for range: want 10, got %d", cl)
+			}
+
+			// ── unsatisfiable range returns 416 ──────────────────────────────
+			oobReq := httptest.NewRequest("GET", "/"+hostAndPath, nil)
+			oobReq.Header.Set("Range", "bytes=100-200")
+			oobW := httptest.NewRecorder()
+			handleGet(oobW, oobReq)
+			if oobW.Result().StatusCode != http.StatusRequestedRangeNotSatisfiable {
+				t.Errorf("out-of-range: want 416, got %d", oobW.Result().StatusCode)
+			}
+		})
+	}
+}
+
 // TestNegativeCacheRuleOverridesTTL verifies that a per-URL rule in
 // NegativeCacheRules takes precedence over the default NegativeCacheTTL.
 func TestNegativeCacheRuleOverridesTTL(t *testing.T) {
