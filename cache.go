@@ -401,18 +401,21 @@ func (c *Cache) negativeCacheTTL(requestedURL string) time.Duration {
 	return config.NegativeCacheTTL
 }
 
-func (c *Cache) isNotFound(requestedURL string) bool {
+// isNotFound returns (true, expiry) when requestedURL is in the negative cache
+// and its TTL has not yet elapsed. Returns (false, zero) otherwise.
+func (c *Cache) isNotFound(requestedURL string) (bool, time.Time) {
 	c.mutex.Lock()
 	t, ok := c.notFoundItems[requestedURL]
 	c.mutex.Unlock()
 	if !ok {
-		return false
+		return false, time.Time{}
 	}
-	if time.Since(t) > c.negativeCacheTTL(requestedURL) {
+	expiry := t.Add(c.negativeCacheTTL(requestedURL))
+	if time.Now().After(expiry) {
 		c.deleteNotFoundEntry(requestedURL)
-		return false
+		return false, time.Time{}
 	}
-	return true
+	return true, expiry
 }
 
 func (c *Cache) putNotFound(requestedURL string) error {

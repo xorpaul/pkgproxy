@@ -312,18 +312,24 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// PATCH always clears any negative cache entry so the next GET re-fetches upstream.
-	if r.Method == "PATCH" && config.NegativeCacheTTL > 0 && cache.isNotFound(fullUrl) {
-		cache.deleteNotFoundEntry(fullUrl)
-		olo.Info("NEGATIVE_CACHE_INVALIDATE via PATCH for '%s'", fullUrl)
-		promCounters["NEGATIVE_CACHE_INVALIDATE"].Inc()
+	if r.Method == "PATCH" && config.NegativeCacheTTL > 0 {
+		if found, _ := cache.isNotFound(fullUrl); found {
+			cache.deleteNotFoundEntry(fullUrl)
+			olo.Info("NEGATIVE_CACHE_INVALIDATE via PATCH for '%s'", fullUrl)
+			promCounters["NEGATIVE_CACHE_INVALIDATE"].Inc()
+		}
 	}
 
 	// Fast path: URL is known to return 404, serve from negative cache (skip for PATCH).
-	if r.Method != "PATCH" && config.NegativeCacheTTL > 0 && cache.isNotFound(fullUrl) {
-		olo.Info("NEGATIVE_CACHE_HIT for '%s'", fullUrl)
-		promCounters["NEGATIVE_CACHE_HIT"].Inc()
-		http.Error(w, "File not found", http.StatusNotFound)
-		return
+	if r.Method != "PATCH" && config.NegativeCacheTTL > 0 {
+		if found, expiry := cache.isNotFound(fullUrl); found {
+			olo.Info("NEGATIVE_CACHE_HIT for '%s'", fullUrl)
+			promCounters["NEGATIVE_CACHE_HIT"].Inc()
+			w.Header().Set("X-Pkgproxy-Negative-Cache", "HIT")
+			w.Header().Set("X-Pkgproxy-Cache-Expires", expiry.UTC().Format(time.RFC3339))
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
 	}
 
 	// Cache miss -> Load data from requested URL and add to cache
@@ -339,13 +345,17 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		}
 		// Re-check after waiting in has() — handles concurrent requests for a
 		// URL that was just 404'd and stored in the negative cache by another goroutine.
-		if config.NegativeCacheTTL > 0 && cache.isNotFound(fullUrl) {
-			cache.cancelBusy(fullUrl)
-			busy.Unlock()
-			olo.Info("NEGATIVE_CACHE_HIT for '%s'", fullUrl)
-			promCounters["NEGATIVE_CACHE_HIT"].Inc()
-			http.Error(w, "File not found", http.StatusNotFound)
-			return
+		if config.NegativeCacheTTL > 0 {
+			if found, expiry := cache.isNotFound(fullUrl); found {
+				cache.cancelBusy(fullUrl)
+				busy.Unlock()
+				olo.Info("NEGATIVE_CACHE_HIT for '%s'", fullUrl)
+				promCounters["NEGATIVE_CACHE_HIT"].Inc()
+				w.Header().Set("X-Pkgproxy-Negative-Cache", "HIT")
+				w.Header().Set("X-Pkgproxy-Cache-Expires", expiry.UTC().Format(time.RFC3339))
+				http.Error(w, "File not found", http.StatusNotFound)
+				return
+			}
 		}
 		defer busy.Unlock()
 		response, err := GetRemote(fullUrl)
@@ -357,6 +367,9 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 				}
 				olo.Info("NEGATIVE_CACHE_PUT for '%s'", fullUrl)
 				promCounters["NEGATIVE_CACHE_PUT"].Inc()
+				expiry := time.Now().Add(cache.negativeCacheTTL(fullUrl))
+				w.Header().Set("X-Pkgproxy-Error", "remote returned HTTP 404")
+				w.Header().Set("X-Pkgproxy-Cache-Expires", expiry.UTC().Format(time.RFC3339))
 				http.Error(w, "File not found", http.StatusNotFound)
 			} else {
 				handleError(response, err, w)
