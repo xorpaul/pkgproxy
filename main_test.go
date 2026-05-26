@@ -7,12 +7,17 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+func mustCompileRegex(s string) *regexp.Regexp {
+	return regexp.MustCompile(s)
+}
 
 func TestMain(m *testing.M) {
 	tmpDir, err := os.MkdirTemp("", "pkgproxy-test-*")
@@ -58,6 +63,7 @@ func initTestMetrics() {
 		"TOTAL_HTTP_NONGET_REQUESTS", "TOTAL_HTTP_REQUESTS", "TOTAL_HTTPS_REQUESTS",
 		"CACHE_HIT", "CACHE_MISS", "CACHE_INVALIDATE", "CACHE_TOO_OLD",
 		"CACHE_OK", "CACHE_ITEM_MISSING",
+		"NEGATIVE_CACHE_HIT", "NEGATIVE_CACHE_PUT", "NEGATIVE_CACHE_INVALIDATE",
 	} {
 		promCounters[name] = prometheus.NewCounter(prometheus.CounterOpts{Name: "test_noop"})
 	}
@@ -190,5 +196,170 @@ func TestHandleGetRemoteNonOKStatus(t *testing.T) {
 	want := "remote returned HTTP 404"
 	if got := resp.Header.Get("X-Pkgproxy-Error"); got != want {
 		t.Errorf("X-Pkgproxy-Error: want %q, got %q", want, got)
+	}
+}
+
+// TestNegativeCacheStopsUpstreamHits verifies that after a 404 is stored in
+// the negative cache, subsequent requests are served from the cache without
+// contacting upstream.
+func TestNegativeCacheStopsUpstreamHits(t *testing.T) {
+	origTTL := config.NegativeCacheTTL
+	config.NegativeCacheTTL = time.Hour
+	defer func() { config.NegativeCacheTTL = origTTL }()
+
+	hitCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCount++
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer backend.Close()
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/missing-file"
+
+	// First request: cache miss, hits upstream, stores negative cache entry.
+	req1 := httptest.NewRequest("GET", "/"+hostAndPath, nil)
+	w1 := httptest.NewRecorder()
+	handleGet(w1, req1)
+	if w1.Result().StatusCode != http.StatusNotFound {
+		t.Fatalf("first request: want 404, got %d", w1.Result().StatusCode)
+	}
+	if hitCount != 1 {
+		t.Fatalf("first request: want 1 upstream hit, got %d", hitCount)
+	}
+
+	// Second request: must be served from negative cache, no upstream hit.
+	req2 := httptest.NewRequest("GET", "/"+hostAndPath, nil)
+	w2 := httptest.NewRecorder()
+	handleGet(w2, req2)
+	if w2.Result().StatusCode != http.StatusNotFound {
+		t.Fatalf("second request: want 404, got %d", w2.Result().StatusCode)
+	}
+	if hitCount != 1 {
+		t.Errorf("second request hit upstream again (want still 1, got %d)", hitCount)
+	}
+}
+
+// TestNegativeCachePatchInvalidates verifies that a PATCH request clears the
+// negative cache entry so the next GET re-fetches from upstream.
+func TestNegativeCachePatchInvalidates(t *testing.T) {
+	origTTL := config.NegativeCacheTTL
+	config.NegativeCacheTTL = time.Hour
+	defer func() { config.NegativeCacheTTL = origTTL }()
+
+	callCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			w.Write([]byte("now it exists"))
+		}
+	}))
+	defer backend.Close()
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/appears-later"
+
+	// Prime the negative cache.
+	req1 := httptest.NewRequest("GET", "/"+hostAndPath, nil)
+	handleGet(httptest.NewRecorder(), req1)
+	if callCount != 1 {
+		t.Fatalf("prime: want 1 upstream call, got %d", callCount)
+	}
+	if !cache.isNotFound("http://" + hostAndPath) {
+		t.Fatal("expected negative cache entry after first 404")
+	}
+
+	// PATCH should invalidate the negative cache entry.
+	reqPatch := httptest.NewRequest("PATCH", "/"+hostAndPath, nil)
+	wPatch := httptest.NewRecorder()
+	handleGet(wPatch, reqPatch)
+	if cache.isNotFound("http://" + hostAndPath) {
+		t.Error("negative cache entry should be cleared after PATCH")
+	}
+
+	// Next GET must re-fetch (entry is now available upstream).
+	req2 := httptest.NewRequest("GET", "/"+hostAndPath, nil)
+	w2 := httptest.NewRecorder()
+	handleGet(w2, req2)
+	if w2.Result().StatusCode != http.StatusOK {
+		t.Fatalf("GET after PATCH: want 200, got %d", w2.Result().StatusCode)
+	}
+	if callCount != 2 {
+		t.Errorf("GET after PATCH: want 2 upstream calls, got %d", callCount)
+	}
+}
+
+// TestNegativeCacheTTLExpiry verifies that an expired negative cache entry
+// allows upstream to be contacted again.
+func TestNegativeCacheTTLExpiry(t *testing.T) {
+	origTTL := config.NegativeCacheTTL
+	config.NegativeCacheTTL = 1 * time.Millisecond
+	defer func() { config.NegativeCacheTTL = origTTL }()
+
+	hitCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCount++
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer backend.Close()
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/ttl-test-file"
+
+	// First request: stores negative cache entry.
+	handleGet(httptest.NewRecorder(), httptest.NewRequest("GET", "/"+hostAndPath, nil))
+	if hitCount != 1 {
+		t.Fatalf("first request: want 1 upstream hit, got %d", hitCount)
+	}
+
+	// Wait for the TTL to expire.
+	time.Sleep(5 * time.Millisecond)
+
+	// Second request: TTL expired, must hit upstream again.
+	handleGet(httptest.NewRecorder(), httptest.NewRequest("GET", "/"+hostAndPath, nil))
+	if hitCount != 2 {
+		t.Errorf("after TTL expiry: want 2 upstream hits, got %d", hitCount)
+	}
+}
+
+// TestNegativeCacheRuleOverridesTTL verifies that a per-URL rule in
+// NegativeCacheRules takes precedence over the default NegativeCacheTTL.
+func TestNegativeCacheRuleOverridesTTL(t *testing.T) {
+	origTTL := config.NegativeCacheTTL
+	origRules := config.NegativeCacheRules
+	config.NegativeCacheTTL = time.Hour
+	config.NegativeCacheRules = map[string]CachingRules{
+		"short-ttl-rule": {
+			Regex:         ".*short-ttl.*",
+			TTL:           1 * time.Millisecond,
+			CompiledRegex: mustCompileRegex(".*short-ttl.*"),
+		},
+	}
+	defer func() {
+		config.NegativeCacheTTL = origTTL
+		config.NegativeCacheRules = origRules
+	}()
+
+	hitCount := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCount++
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer backend.Close()
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/short-ttl-resource"
+
+	// First request: stores negative cache entry with 1ms TTL (from rule).
+	handleGet(httptest.NewRecorder(), httptest.NewRequest("GET", "/"+hostAndPath, nil))
+	if hitCount != 1 {
+		t.Fatalf("first request: want 1 upstream hit, got %d", hitCount)
+	}
+
+	// Wait for the rule TTL (1ms) to expire, default (1h) has not expired.
+	time.Sleep(5 * time.Millisecond)
+
+	// Second request: rule TTL expired, must hit upstream again.
+	handleGet(httptest.NewRecorder(), httptest.NewRequest("GET", "/"+hostAndPath, nil))
+	if hitCount != 2 {
+		t.Errorf("after rule TTL expiry: want 2 upstream hits, got %d", hitCount)
 	}
 }

@@ -20,6 +20,7 @@ import (
 type Cache struct {
 	busyItems        map[string]*sync.Mutex
 	cacheMemoryItems map[string]CacheMemoryItem
+	notFoundItems    map[string]time.Time
 	mutex            *sync.Mutex
 }
 
@@ -48,6 +49,7 @@ func CreateCache() (*Cache, error) {
 	mutex := &sync.Mutex{}
 	busy := make(map[string]*sync.Mutex)
 	memory := make(map[string]CacheMemoryItem)
+	notFound := make(map[string]time.Time)
 
 	// Go through every file an save its name in the map. The content of the file
 	// is loaded when needed. This makes sure that we don't have to read
@@ -66,6 +68,27 @@ func CreateCache() (*Cache, error) {
 			urlScheme = "https://"
 			cfTrim = CacheFolderHTTPS
 		}
+
+		// Negative-cache sentinel files: restore notFoundItems from disk.
+		if strings.HasSuffix(d.Name(), ".404") {
+			fi, fiErr := d.Info()
+			if fiErr != nil {
+				return nil
+			}
+			itemPath := strings.TrimSuffix(strings.TrimPrefix(path, cfTrim), ".404")
+			itemPath, err = url.QueryUnescape(itemPath)
+			if err != nil {
+				olo.Fatal("While url decode .404 sentinel file %s Error: %s", path, err.Error())
+				return err
+			}
+			itemURL := urlScheme + itemPath
+			mutex.Lock()
+			notFound[itemURL] = fi.ModTime()
+			mutex.Unlock()
+			olo.Debug("prefillCache: restored negative cache entry for %s (mtime %s)", itemURL, fi.ModTime())
+			return nil
+		}
+
 		cachedItem := strings.TrimPrefix(path, cfTrim)
 		cachedItem, err = url.QueryUnescape(cachedItem)
 		if err != nil {
@@ -130,6 +153,7 @@ func CreateCache() (*Cache, error) {
 		busyItems:        busy,
 		mutex:            mutex,
 		cacheMemoryItems: memory,
+		notFoundItems:    notFound,
 	}
 
 	return cache, nil
@@ -366,6 +390,78 @@ func checkCacheTTL(filePath string, requestedURL string, defaultCacheTTL time.Du
 	olo.Info("CACHE_OK until '%s'/'%s' for requested URL '%s'", time.Until(validUntil), validUntil.Format("2006-01-02 15:04:05"), requestedURL)
 	promCounters["CACHE_OK"].Inc()
 	return nil
+}
+
+func (c *Cache) negativeCacheTTL(requestedURL string) time.Duration {
+	for _, rule := range config.NegativeCacheRules {
+		if rule.CompiledRegex.MatchString(requestedURL) {
+			return rule.TTL
+		}
+	}
+	return config.NegativeCacheTTL
+}
+
+func (c *Cache) isNotFound(requestedURL string) bool {
+	c.mutex.Lock()
+	t, ok := c.notFoundItems[requestedURL]
+	c.mutex.Unlock()
+	if !ok {
+		return false
+	}
+	if time.Since(t) > c.negativeCacheTTL(requestedURL) {
+		c.deleteNotFoundEntry(requestedURL)
+		return false
+	}
+	return true
+}
+
+func (c *Cache) putNotFound(requestedURL string) error {
+	cacheFolder := config.CacheFolder
+	if strings.HasPrefix(requestedURL, "https://") {
+		cacheFolder = config.CacheFolderHTTPS
+	}
+	urlParts := strings.SplitN(requestedURL, "/", 4)
+	if len(urlParts) < 4 {
+		return fmt.Errorf("invalid URL for negative cache: %s", requestedURL)
+	}
+	fileCacheDir := filepath.Join(cacheFolder, urlParts[2])
+	if _, err := h.CheckDirAndCreate(fileCacheDir, "Cache.putNotFound"); err != nil {
+		return err
+	}
+	sentinelFile := filepath.Join(fileCacheDir, url.QueryEscape(urlParts[3])+".404")
+
+	f, err := os.Create(sentinelFile)
+	if err != nil {
+		return err
+	}
+	f.Close()
+
+	now := time.Now()
+	c.mutex.Lock()
+	c.notFoundItems[requestedURL] = now
+	c.mutex.Unlock()
+	return nil
+}
+
+// deleteNotFoundEntry removes a negative cache entry from memory and deletes
+// its sentinel file from disk (best-effort).
+func (c *Cache) deleteNotFoundEntry(requestedURL string) {
+	c.mutex.Lock()
+	delete(c.notFoundItems, requestedURL)
+	c.mutex.Unlock()
+
+	cacheFolder := config.CacheFolder
+	if strings.HasPrefix(requestedURL, "https://") {
+		cacheFolder = config.CacheFolderHTTPS
+	}
+	urlParts := strings.SplitN(requestedURL, "/", 4)
+	if len(urlParts) < 4 {
+		return
+	}
+	sentinelFile := filepath.Join(cacheFolder, urlParts[2], url.QueryEscape(urlParts[3])+".404")
+	if err := os.Remove(sentinelFile); err != nil && !os.IsNotExist(err) {
+		olo.Debug("could not remove expired .404 sentinel %s: %s", sentinelFile, err)
+	}
 }
 
 func (c *Cache) fillInMemoryCacheWithFileContent(file string, requestedURL string) error {

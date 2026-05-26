@@ -38,6 +38,9 @@ type Config struct {
 	ServiceNameDefaultCacheTTL map[string]CachingRules `yaml:"service_default_cache_ttl"`
 	MaxCacheItemSize           int64                   `yaml:"max_cache_item_size_in_mb"`
 	CacheRules                 map[string]CachingRules `yaml:"caching_rules"`
+	NegativeCacheTTLString     string                  `yaml:"negative_cache_ttl"`
+	NegativeCacheTTL           time.Duration
+	NegativeCacheRules         map[string]CachingRules `yaml:"negative_caching_rules"`
 	ReturnCacheIfRemoteFails   bool                    `yaml:"return_cache_if_remote_fails"`
 	PrometheusMetricPrefix     string                  `yaml:"prometheus_metric_prefix"`
 	ListenAddressPrometheus    string                  `yaml:"listen_address_prometheus"`
@@ -92,6 +95,24 @@ func LoadConfig(path string) (*Config, error) {
 	config.DefaultCacheTTL, err = time.ParseDuration(config.DefaultCacheTTLString)
 	if err != nil {
 		return nil, err
+	}
+
+	if config.NegativeCacheTTLString != "" {
+		config.NegativeCacheTTL, err = time.ParseDuration(config.NegativeCacheTTLString)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for name, cr := range config.NegativeCacheRules {
+		olo.Info("adding negative caching rule '%s': regex:'%s' ttl:'%s'", name, cr.Regex, cr.TTLString)
+		cr.TTL, err = time.ParseDuration(cr.TTLString)
+		if err != nil {
+			return nil, err
+		}
+		cr.CompiledRegex = regexp.MustCompile(cr.Regex)
+		olo.Info("setting negative cache ttl to '%s' for regex '%s'", cr.TTL, cr.Regex)
+		config.NegativeCacheRules[name] = cr
 	}
 
 	for name, cr := range config.ServiceNameDefaultCacheTTL {
