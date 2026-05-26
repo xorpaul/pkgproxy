@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -465,6 +466,96 @@ func (c *Cache) deleteNotFoundEntry(requestedURL string) {
 	if err := os.Remove(sentinelFile); err != nil && !os.IsNotExist(err) {
 		olo.Debug("could not remove expired .404 sentinel %s: %s", sentinelFile, err)
 	}
+}
+
+// invalidateByPrefix removes all metadata cache entries (positive and negative)
+// whose URL begins with urlPrefix and whose URL matches at least one of the
+// provided metadata patterns. Package binaries that do not match any pattern
+// are left untouched. Returns the number of cache entries removed.
+func (c *Cache) invalidateByPrefix(urlPrefix string, patterns []*regexp.Regexp) (int, error) {
+	cacheFolder := config.CacheFolder
+	scheme := "http://"
+	if strings.HasPrefix(urlPrefix, "https://") {
+		cacheFolder = config.CacheFolderHTTPS
+		scheme = "https://"
+	}
+
+	withoutScheme := strings.TrimPrefix(strings.TrimPrefix(urlPrefix, "https://"), "http://")
+	parts := strings.SplitN(withoutScheme, "/", 2)
+	domain := parts[0]
+	pathPrefix := ""
+	if len(parts) > 1 {
+		pathPrefix = parts[1]
+	}
+
+	domainDir := filepath.Join(cacheFolder, domain)
+	entries, err := os.ReadDir(domainDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	encodedPrefix := url.QueryEscape(pathPrefix)
+
+	type target struct {
+		filePath string
+		fullURL  string
+	}
+	var toDelete []target
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		baseName := strings.TrimSuffix(name, ".404")
+
+		if !strings.HasPrefix(baseName, encodedPrefix) {
+			continue
+		}
+
+		decodedPath, decErr := url.QueryUnescape(baseName)
+		if decErr != nil {
+			continue
+		}
+		fullURL := scheme + domain + "/" + decodedPath
+
+		matched := false
+		for _, pat := range patterns {
+			if pat.MatchString(fullURL) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+
+		toDelete = append(toDelete, target{
+			filePath: filepath.Join(domainDir, name),
+			fullURL:  fullURL,
+		})
+	}
+
+	c.mutex.Lock()
+	for _, item := range toDelete {
+		delete(c.cacheMemoryItems, item.fullURL)
+		delete(c.notFoundItems, item.fullURL)
+	}
+	c.mutex.Unlock()
+
+	count := 0
+	for _, item := range toDelete {
+		if err := os.Remove(item.filePath); err != nil && !os.IsNotExist(err) {
+			olo.Debug("invalidateByPrefix: could not remove %s: %s", item.filePath, err)
+		} else {
+			count++
+		}
+	}
+
+	return count, nil
 }
 
 func (c *Cache) fillInMemoryCacheWithFileContent(file string, requestedURL string) error {

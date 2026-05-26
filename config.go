@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -13,6 +14,21 @@ import (
 	olo "github.com/xorpaul/sigolo"
 	yaml "gopkg.in/yaml.v2"
 )
+
+// defaultMetadataPatternStrings lists the built-in regex patterns used by
+// DELETE requests to identify repo metadata files (APT and YUM/DNF repos).
+// Overridden by metadata_file_patterns in the config file.
+var defaultMetadataPatternStrings = []string{
+	`.*/Packages(\.gz|\.bz2|\.xz|\.zst)?$`,
+	`.*/Sources(\.gz|\.bz2|\.xz|\.zst)?$`,
+	`.*/InRelease$`,
+	`.*/Release(\.gpg)?$`,
+	`.*/Translation-[^/]+$`,
+	`.*/Contents-[^/]+(\.(gz|bz2|xz|zst))?$`,
+	`.*/repomd\.xml$`,
+	`.*/repodata/.*\.(xml|sqlite)(\.gz|\.bz2|\.xz|\.zst)?$`,
+	`.*/.*\.db(\.gz|\.bz2|\.xz|\.zst)?$`,
+}
 
 type Config struct {
 	Debug                      bool     `yaml:"debug"`
@@ -40,8 +56,10 @@ type Config struct {
 	CacheRules                 map[string]CachingRules `yaml:"caching_rules"`
 	NegativeCacheTTLString     string                  `yaml:"negative_cache_ttl"`
 	NegativeCacheTTL           time.Duration
-	NegativeCacheRules         map[string]CachingRules `yaml:"negative_caching_rules"`
-	ReturnCacheIfRemoteFails   bool                    `yaml:"return_cache_if_remote_fails"`
+	NegativeCacheRules              map[string]CachingRules `yaml:"negative_caching_rules"`
+	MetadataPatterns                []string                `yaml:"metadata_file_patterns"`
+	CompiledMetadataPatterns        []*regexp.Regexp
+	ReturnCacheIfRemoteFails        bool `yaml:"return_cache_if_remote_fails"`
 	PrometheusMetricPrefix     string                  `yaml:"prometheus_metric_prefix"`
 	ListenAddressPrometheus    string                  `yaml:"listen_address_prometheus"`
 	ListenPortPrometheus       int                     `yaml:"listen_port_prometheus"`
@@ -145,6 +163,18 @@ func LoadConfig(path string) (*Config, error) {
 	config.CacheFolderHTTPS, err = filepath.Abs(config.CacheFolderHTTPS)
 	if err != nil {
 		return nil, err
+	}
+
+	patterns := config.MetadataPatterns
+	if len(patterns) == 0 {
+		patterns = defaultMetadataPatternStrings
+	}
+	for _, p := range patterns {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid metadata_file_patterns entry %q: %w", p, err)
+		}
+		config.CompiledMetadataPatterns = append(config.CompiledMetadataPatterns, re)
 	}
 
 	olo.Debug("using config settings: %+v", config)
