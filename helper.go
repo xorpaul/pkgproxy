@@ -14,15 +14,17 @@ import (
 func handleError(response *http.Response, err error, w http.ResponseWriter) {
 	olo.Error("%s", err.Error())
 	if response != nil {
+		w.Header().Set("X-Pkgproxy-Error", fmt.Sprintf("remote returned HTTP %d", response.StatusCode))
 		w.WriteHeader(response.StatusCode)
-		bodyBytes, err := io.ReadAll(response.Body)
-		if err != nil {
+		bodyBytes, readErr := io.ReadAll(response.Body)
+		if readErr != nil {
 			olo.Error("Error while reading failed response body")
 		}
 		w.Write(bodyBytes)
 	} else {
+		w.Header().Set("X-Pkgproxy-Error", "remote-unreachable")
 		w.WriteHeader(500)
-		fmt.Fprint(w, err.Error())
+		fmt.Fprintf(w, "pkgproxy: could not reach the requested remote URL\n\nError: %s\n\nPlease check that the URL path is correct and the remote host is reachable from pkgproxy.\n", err.Error())
 	}
 }
 
