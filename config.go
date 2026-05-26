@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	h "github.com/xorpaul/gohelper"
@@ -44,9 +45,10 @@ type Config struct {
 }
 
 type CachingRules struct {
-	Regex     string        `yaml:"regex"`
-	TTLString string        `yaml:"ttl"`
-	TTL       time.Duration `yaml:"ttlDuration"`
+	Regex          string         `yaml:"regex"`
+	TTLString      string         `yaml:"ttl"`
+	TTL            time.Duration  `yaml:"ttlDuration"`
+	CompiledRegex  *regexp.Regexp `yaml:"-"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -82,6 +84,7 @@ func LoadConfig(path string) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		cr.CompiledRegex = regexp.MustCompile(cr.Regex)
 		olo.Info("setting ttl to '%s' for regex '%s'", cr.TTL, cr.Regex)
 		config.CacheRules[name] = cr
 	}
@@ -97,6 +100,7 @@ func LoadConfig(path string) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		cr.CompiledRegex = regexp.MustCompile(cr.Regex)
 		config.ServiceNameDefaultCacheTTL[name] = cr
 	}
 

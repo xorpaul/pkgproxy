@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -236,9 +235,8 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	// to change the default cache TTL to 1 year and so on
 	defaultCacheTTL := config.DefaultCacheTTL
 	for name, cr := range config.ServiceNameDefaultCacheTTL {
-		re := regexp.MustCompile(cr.Regex)
 		// olo.Debug("comparing regex rule: '%s' with regex '%s' with cacheURL: '%s'", name, cr.Regex, cacheURL)
-		if re.MatchString(r.Host) {
+		if cr.CompiledRegex.MatchString(r.Host) {
 			olo.Debug("found matching service name regex rule: '%s' with regex '%s' and default ttl '%s' for service name: '%s'", name, cr.Regex, cr.TTL, r.Host)
 			defaultCacheTTL = cr.TTL
 			olo.Debug("setting default ttl to '%s' for service name '%s'", defaultCacheTTL.String(), r.Host)

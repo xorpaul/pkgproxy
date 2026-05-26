@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -31,7 +33,7 @@ func TestCachingRuleServesFromCacheWhileFresh(t *testing.T) {
 	defer backend.Close()
 
 	config.CacheRules = map[string]CachingRules{
-		"RPM Packages": {Regex: `.*\.rpm$`, TTLString: "1h", TTL: time.Hour},
+		"RPM Packages": {Regex: `.*\.rpm$`, TTLString: "1h", TTL: time.Hour, CompiledRegex: regexp.MustCompile(`.*\.rpm$`)},
 	}
 	t.Cleanup(func() { config.CacheRules = nil })
 
@@ -69,7 +71,7 @@ func TestCachingRuleRefreshesAfterExpiry(t *testing.T) {
 	defer backend.Close()
 
 	config.CacheRules = map[string]CachingRules{
-		"RPM Packages": {Regex: `.*\.rpm$`, TTLString: "30m", TTL: 30 * time.Minute},
+		"RPM Packages": {Regex: `.*\.rpm$`, TTLString: "30m", TTL: 30 * time.Minute, CompiledRegex: regexp.MustCompile(`.*\.rpm$`)},
 	}
 	t.Cleanup(func() { config.CacheRules = nil })
 
@@ -116,7 +118,7 @@ func TestDefaultCacheTTLAppliedWhenNoRuleMatches(t *testing.T) {
 
 	// Rule only matches .rpm; request is for .txt, so default TTL (1h) applies.
 	config.CacheRules = map[string]CachingRules{
-		"RPM Packages": {Regex: `.*\.rpm$`, TTLString: "1ms", TTL: time.Millisecond},
+		"RPM Packages": {Regex: `.*\.rpm$`, TTLString: "1ms", TTL: time.Millisecond, CompiledRegex: regexp.MustCompile(`.*\.rpm$`)},
 	}
 	t.Cleanup(func() { config.CacheRules = nil })
 
@@ -146,5 +148,92 @@ func TestDefaultCacheTTLAppliedWhenNoRuleMatches(t *testing.T) {
 	}
 	if n := backendCalls.Load(); n != 1 {
 		t.Errorf("second request: want 1 backend call (default TTL, still fresh), got %d", n)
+	}
+}
+
+// TestCachePutFlushesCompleteContent verifies that cache.put writes the full
+// content to disk. bufio.Writer buffers writes internally; without an explicit
+// Flush() the trailing partial buffer is never written to the file. We use a
+// payload larger than bufio's default 4096-byte buffer so the final chunk
+// stays buffered until Flush() forces it out.
+func TestCachePutFlushesCompleteContent(t *testing.T) {
+	const size = 8192
+	content := strings.Repeat("x", size)
+	r := strings.NewReader(content)
+	var reader io.Reader = r
+
+	rawURL := "http://flush-test.example.com/bigfile.bin"
+	if err := cache.put(rawURL, &reader, int64(size)); err != nil {
+		t.Fatalf("cache.put: %v", err)
+	}
+
+	// Reconstruct the on-disk path using the same logic as cache.put.
+	parts := strings.SplitN(rawURL, "/", 4)
+	cacheFile := filepath.Join(config.CacheFolder, parts[2], url.QueryEscape(parts[3]))
+
+	data, err := os.ReadFile(cacheFile)
+	if err != nil {
+		t.Fatalf("reading cache file from disk: %v", err)
+	}
+	if len(data) != size {
+		t.Errorf("cache file size on disk: want %d bytes, got %d (trailing buffer not flushed?)", size, len(data))
+	}
+	if string(data) != content {
+		t.Error("cache file content does not match written content")
+	}
+}
+
+// TestCreateCachePrefillsBothHTTPAndHTTPS verifies that when
+// prefill_cache_on_startup is true, CreateCache indexes files from both the
+// HTTP cache dir and the HTTPS cache dir. This covers the code path where two
+// concurrent WalkDir goroutines both complete and their results are both
+// awaited before CreateCache returns.
+func TestCreateCachePrefillsBothHTTPAndHTTPS(t *testing.T) {
+	tmpDir := t.TempDir()
+	httpDir := filepath.Join(tmpDir, "http")
+	httpsDir := filepath.Join(tmpDir, "https")
+
+	// Create one cached file under each scheme dir, mirroring the directory
+	// structure that cache.put writes: <cacheDir>/<host>/<encoded-path>.
+	if err := os.MkdirAll(filepath.Join(httpDir, "pkg.example.com"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(httpDir, "pkg.example.com", "file.rpm"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(httpsDir, "secure.example.com"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(httpsDir, "secure.example.com", "file.deb"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldHTTP := config.CacheFolder
+	oldHTTPS := config.CacheFolderHTTPS
+	oldPrefill := config.PrefillCacheOnStartup
+	config.CacheFolder = httpDir
+	config.CacheFolderHTTPS = httpsDir
+	config.PrefillCacheOnStartup = true
+	t.Cleanup(func() {
+		config.CacheFolder = oldHTTP
+		config.CacheFolderHTTPS = oldHTTPS
+		config.PrefillCacheOnStartup = oldPrefill
+	})
+
+	c, err := CreateCache()
+	if err != nil {
+		t.Fatalf("CreateCache: %v", err)
+	}
+
+	c.mutex.Lock()
+	_, hasHTTP := c.cacheMemoryItems["http://pkg.example.com/file.rpm"]
+	_, hasHTTPS := c.cacheMemoryItems["https://secure.example.com/file.deb"]
+	c.mutex.Unlock()
+
+	if !hasHTTP {
+		t.Error("HTTP cache file not indexed by CreateCache")
+	}
+	if !hasHTTPS {
+		t.Error("HTTPS cache file not indexed by CreateCache")
 	}
 }
