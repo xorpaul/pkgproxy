@@ -7,17 +7,17 @@
 - Negative caching for 404 responses: non-existent paths are cached and served with informative `X-Cache-Status`, `X-Cache-Expires`, and `X-Negative-Cache` headers
 - ETag/Last-Modified passthrough: conditional GET revalidation now uses upstream `ETag` and `Last-Modified` values so clients can revalidate efficiently
 - Range request and correct `Content-Length` support via `http.ServeContent`
-- GitHub Actions workflow to run tests on pull requests
+- GitHub Actions workflow to run tests on pull requests ([#26](https://github.com/xorpaul/pkgproxy/pull/26))
 
 ### Changed
 
-- Pre-compile `CachingRules` regexes at startup instead of per-request for better performance
+- Pre-compile `CachingRules` regexes at startup instead of per-request for better performance ([#27](https://github.com/xorpaul/pkgproxy/pull/27))
 
 ### Fixed
 
-- Goroutine leak and missing flush in cache writer
-- `PATCH` requests on non-cached items now return 404 instead of silently doing nothing
-- Added helpful `X-Pkgproxy-Error` response header and body when the remote URL is unreachable
+- Goroutine leak and missing flush in cache writer ([#27](https://github.com/xorpaul/pkgproxy/pull/27))
+- `PATCH` requests on non-cached items now return 404 instead of silently doing nothing ([#28](https://github.com/xorpaul/pkgproxy/pull/28))
+- Added helpful `X-Pkgproxy-Error` response header and body when the remote URL is unreachable ([#26](https://github.com/xorpaul/pkgproxy/pull/26))
 
 ## [v0.1.2]
 
