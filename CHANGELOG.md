@@ -1,6 +1,6 @@
 # Changelog
 
-## [v0.4] - 2026-10-30
+## [v0.5] - 2026-10-30
 
 ### Added
 
@@ -11,6 +11,13 @@
 - Downloads without a `Content-Length` (chunked upstream responses, `contentLength == -1`) were always put into the in-memory cache, even with `max_cache_item_size_in_mb: 0`, which ran multi-GB files out of memory and crashed the service. The decision is now based on the bytes actually written, and `max_cache_item_size_in_mb: 0` never buffers in memory
 - A download that failed midway (upstream cut the connection or sent fewer bytes than announced) was answered with the upstream's `200` and an empty or truncated body. The proxy now answers `502` with `X-Pkgproxy-Error: upstream-download-failed` and removes the partial cache file so it is never served as a cache hit
 - The in-memory cache debug log printed the limit in bytes under the label `max_cache_item_size_in_mb`
+
+### Changed
+
+- Updated vendor dependencies: `prometheus/common` v0.72.1 → v0.73.1, `prometheus/procfs` v0.22.0 → v0.23.0, `xo/terminfo` v1.2.0 → v1.3.0, added `pandatix/go-abnf` v0.5.3 (new indirect dependency)
+- Updated the `go-build-release` submodule
+
+## [v0.4]
 
 ### Changed
 
