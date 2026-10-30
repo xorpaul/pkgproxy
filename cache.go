@@ -373,8 +373,16 @@ func (c *Cache) put(requestedURL string, content *io.Reader, contentLength int64
 		return err
 	}
 	defer file.Close()
+	// never leave a partial download behind, it would be served as a cache hit
+	complete := false
+	defer func() {
+		if !complete {
+			os.Remove(cacheFile)
+		}
+	}()
 
 	writer := bufio.NewWriter(file)
+	copyStart := time.Now()
 	written, err := io.Copy(writer, *content)
 	if err != nil {
 		return err
@@ -382,11 +390,19 @@ func (c *Cache) put(requestedURL string, content *io.Reader, contentLength int64
 	if err = writer.Flush(); err != nil {
 		return err
 	}
+	// The copy is paced by the upstream body, so this is the effective
+	// download speed from the upstream server.
+	downloadDuration := time.Since(copyStart)
+	olo.Info("UPSTREAM_DOWNLOAD of '%s': %d bytes in %.2fs (%s)", requestedURL, written, downloadDuration.Seconds(), formatSpeed(written, downloadDuration))
+	complete = true
 	olo.Debug("Wrote content size %d of entry %s into file %s", written, requestedURL, cacheFile)
 
-	if contentLength <= config.MaxCacheItemSize*1024*1024 {
+	// Decide on the bytes actually written, not the declared Content-Length,
+	// which is -1 for chunked responses. max_cache_item_size_in_mb 0 disables
+	// the in-memory cache.
+	if config.MaxCacheItemSize > 0 && written <= config.MaxCacheItemSize*1024*1024 {
 		// write to in-memory
-		olo.Debug("Content size of %s is %d not larger than max_cache_item_size_in_mb %d so we write it also into a memory buffer", requestedURL, contentLength, config.MaxCacheItemSize*1024*1024)
+		olo.Debug("Content size of %s is %d not larger than max_cache_item_size_in_mb %d so we write it also into a memory buffer", requestedURL, written, config.MaxCacheItemSize)
 		// Small enough to put it into the in-memory cache
 		err = c.fillInMemoryCacheWithFileContent(cacheFile, requestedURL)
 		if err != nil {
@@ -653,4 +669,15 @@ func (c *Cache) fillInMemoryCacheWithFileContent(file string, requestedURL strin
 	olo.Debug("Added %s for %s back into in-memory cache with size of %d", file, requestedURL, size)
 	defer c.release(requestedURL, buffer.Bytes(), time.Now())
 	return nil
+}
+
+// formatSpeed renders the throughput of transferring bytes in duration as
+// MB/s and Mbit/s.
+func formatSpeed(bytes int64, duration time.Duration) string {
+	secs := duration.Seconds()
+	if secs <= 0 {
+		return "n/a"
+	}
+	bytesPerSec := float64(bytes) / secs
+	return fmt.Sprintf("%.2f MB/s, %.1f Mbit/s", bytesPerSec/1e6, bytesPerSec*8/1e6)
 }
