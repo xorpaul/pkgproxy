@@ -139,8 +139,10 @@ func prepare() {
 		netTransport.Proxy = http.ProxyURL(config.ProxyURL)
 	}
 
+	// No Client.Timeout: it limits the total time of a request including the
+	// body download and would cut off every large download that takes longer.
+	// doWithStallTimeout aborts stalled upstream connections instead.
 	client = &http.Client{
-		Timeout:   time.Minute * 3,
 		Transport: netTransport,
 	}
 
@@ -393,7 +395,29 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		defer busy.Unlock()
-		response, err := GetRemote(fullUrl)
+
+		// Stream the download to the requester while it is cached, so large
+		// files start flowing immediately instead of after the complete
+		// download. Range and HEAD requests need the complete file first.
+		var stream *streamWriter
+		var onOK func(*http.Response) io.Writer
+		if r.Method == "GET" && r.Header.Get("Range") == "" {
+			stream = &streamWriter{w: w}
+			onOK = stream.start
+		}
+		response, err := getRemote(fullUrl, onOK)
+		if stream != nil && stream.started {
+			if err != nil {
+				cache.cancelBusy(fullUrl)
+				// The status line and headers are already sent, so the failure
+				// can only be signalled by aborting the connection. A clean
+				// EOF would look like a complete download to the client.
+				olo.Error("download of '%s' failed after %d bytes were streamed to '%s': %s", fullUrl, stream.written, requesterIP, err)
+				panic(http.ErrAbortHandler)
+			}
+			olo.Info("STREAMED '%s' to '%s' while caching (%d bytes)", fullUrl, requesterIP, stream.written)
+			return
+		}
 		if err != nil {
 			cache.cancelBusy(fullUrl)
 			if response != nil && response.StatusCode == http.StatusNotFound && config.NegativeCacheTTL > 0 {
@@ -432,6 +456,59 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// streamWriter forwards the body of an upstream download to the requester
+// while it is being cached. It sends the response headers with the first
+// chunk, so an upstream failure before any data arrived can still be answered
+// with a proper error status. If the requester goes away, the writer stops
+// forwarding but reports no error, so the download still completes and
+// is cached.
+type streamWriter struct {
+	w          http.ResponseWriter
+	started    bool
+	clientGone bool
+	written    int64
+	contentLen int64
+}
+
+// start records the upstream response and returns the writer to tee the body to.
+func (s *streamWriter) start(response *http.Response) io.Writer {
+	s.contentLen = response.ContentLength
+	return s
+}
+
+func (s *streamWriter) Write(p []byte) (int, error) {
+	if s.clientGone {
+		return len(p), nil
+	}
+	if !s.started {
+		s.started = true
+		hdr := s.w.Header()
+		// make sure that content is only supposed to be downloaded
+		hdr.Set("Content-Disposition", "attachment")
+		hdr.Set("Accept-Ranges", "bytes")
+		hdr.Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+		if s.contentLen >= 0 {
+			hdr.Set("Content-Length", strconv.FormatInt(s.contentLen, 10))
+		}
+	}
+	// the server's WriteTimeout limits the whole response, extend it with every
+	// chunk so long running downloads are not cut off while data keeps flowing
+	if config.Timeout > 0 {
+		http.NewResponseController(s.w).SetWriteDeadline(time.Now().Add(time.Duration(config.Timeout) * time.Second))
+	}
+	n, err := s.w.Write(p)
+	s.written += int64(n)
+	if f, ok := s.w.(http.Flusher); ok && err == nil {
+		// don't let the server hold back small chunks of a slow upstream
+		f.Flush()
+	}
+	if err != nil {
+		olo.Warn("requester went away while streaming, continuing to cache: %s", err)
+		s.clientGone = true
+	}
+	return len(p), nil
+}
+
 // tryConditionalGet attempts to revalidate the cached item for requestedURL
 // using HTTP conditional GET (If-None-Match / If-Modified-Since). Returns
 // (true, nil) if the cache was handled (304 kept, or 200 updated). Returns
@@ -462,7 +539,7 @@ func tryConditionalGet(requestedURL string) (bool, error) {
 	}
 
 	before := time.Now()
-	response, err := client.Do(req)
+	response, err := doWithStallTimeout(req)
 	if err != nil {
 		return false, err
 	}
@@ -515,7 +592,55 @@ func tryConditionalGet(requestedURL string) (bool, error) {
 	}
 }
 
+// upstreamStallTimeout is how long an upstream request may wait for response
+// headers or for the next chunk of the body before it is aborted.
+var upstreamStallTimeout = 3 * time.Minute
+
+// doWithStallTimeout performs req like client.Do, but instead of a hard limit
+// on the total request time it aborts the request if the upstream sends no
+// data for upstreamStallTimeout. Downloads of any size succeed as long as data
+// keeps flowing.
+func doWithStallTimeout(req *http.Request) (*http.Response, error) {
+	ctx, cancel := context.WithCancel(req.Context())
+	timer := time.AfterFunc(upstreamStallTimeout, cancel)
+	response, err := client.Do(req.WithContext(ctx))
+	if err != nil {
+		timer.Stop()
+		cancel()
+		return response, err
+	}
+	response.Body = &stallTimeoutBody{ReadCloser: response.Body, timer: timer, cancel: cancel}
+	return response, nil
+}
+
+type stallTimeoutBody struct {
+	io.ReadCloser
+	timer  *time.Timer
+	cancel context.CancelFunc
+}
+
+func (b *stallTimeoutBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.timer.Reset(upstreamStallTimeout)
+	return n, err
+}
+
+func (b *stallTimeoutBody) Close() error {
+	b.timer.Stop()
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
+
 func GetRemote(requestedURL string) (*http.Response, error) {
+	return getRemote(requestedURL, nil)
+}
+
+// getRemote downloads requestedURL into the cache. If onOK is not nil it is
+// called with the upstream 200 response before the body is read and returns a
+// writer that receives the body while it is being cached (streaming it to the
+// requester).
+func getRemote(requestedURL string, onOK func(*http.Response) io.Writer) (*http.Response, error) {
 	if len(config.Proxy) > 0 {
 		olo.Info("GETing %s with proxy %s", requestedURL, config.Proxy)
 	} else {
@@ -530,7 +655,7 @@ func GetRemote(requestedURL string) (*http.Response, error) {
 	req.Header.Set("Connection", "keep-alive")
 
 	before := time.Now()
-	response, err := client.Do(req)
+	response, err := doWithStallTimeout(req)
 	if err != nil {
 		return response, err
 	}
@@ -541,7 +666,11 @@ func GetRemote(requestedURL string) (*http.Response, error) {
 		promCounters["REMOTE_OK"].Inc()
 		duration := time.Since(before).Seconds()
 		olo.Debug("GETing %s took %.5fs", requestedURL, duration)
-		err = cache.put(requestedURL, &reader, response.ContentLength)
+		var client io.Writer
+		if onOK != nil {
+			client = onOK(response)
+		}
+		err = cache.putTee(requestedURL, &reader, response.ContentLength, client)
 		if err != nil {
 			response.Body.Close()
 			return response, err

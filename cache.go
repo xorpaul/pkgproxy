@@ -106,8 +106,8 @@ func CreateCache() (*Cache, error) {
 		if d.IsDir() {
 			return nil
 		}
-		// Meta sidecars are not cache items; skip them.
-		if strings.HasSuffix(d.Name(), ".meta") {
+		// Meta sidecars and unfinished downloads are not cache items; skip them.
+		if strings.HasSuffix(d.Name(), ".meta") || strings.HasSuffix(d.Name(), ".part") {
 			return nil
 		}
 		olo.Debug("prefill cache with path: %s", path)
@@ -350,6 +350,16 @@ func (c *Cache) release(requestedURL string, content []byte, loadedAt time.Time)
 }
 
 func (c *Cache) put(requestedURL string, content *io.Reader, contentLength int64) error {
+	return c.putTee(requestedURL, content, contentLength, nil)
+}
+
+// putTee caches the content like put and, if client is not nil, also writes
+// every chunk to client while it is downloaded, so large files reach the
+// requester without waiting for the complete download. The download is written
+// to <cachefile>.part and only renamed to the final cache file once complete,
+// so a failed or interrupted download never leaves a servable partial file.
+// client must not return errors, a vanished requester must not abort caching.
+func (c *Cache) putTee(requestedURL string, content *io.Reader, contentLength int64, client io.Writer) error {
 	// make sure cache directories exist
 	cacheFolder := config.CacheFolder
 	if strings.HasPrefix(requestedURL, "https://") {
@@ -368,26 +378,37 @@ func (c *Cache) put(requestedURL string, content *io.Reader, contentLength int64
 	cacheFile := filepath.Join(fileCacheDir, uriEncoded)
 
 	// always write to file
-	file, err := os.Create(cacheFile)
+	partFile := cacheFile + ".part"
+	file, err := os.Create(partFile)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 	// never leave a partial download behind, it would be served as a cache hit
 	complete := false
 	defer func() {
+		file.Close()
 		if !complete {
-			os.Remove(cacheFile)
+			os.Remove(partFile)
 		}
 	}()
 
 	writer := bufio.NewWriter(file)
+	var dst io.Writer = writer
+	if client != nil {
+		dst = io.MultiWriter(writer, client)
+	}
 	copyStart := time.Now()
-	written, err := io.Copy(writer, *content)
+	written, err := io.Copy(dst, *content)
 	if err != nil {
 		return err
 	}
 	if err = writer.Flush(); err != nil {
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(partFile, cacheFile); err != nil {
 		return err
 	}
 	// The copy is paced by the upstream body, so this is the effective

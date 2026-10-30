@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Upstream downloads were cut off after 3 minutes in total (`http.Client.Timeout` also covers reading the body), so every file that needed longer, e.g. the 8.3 GB Harvester ISO at less than about 46 MB/s, failed with `502`. The total limit is removed; an upstream request is now only aborted when it sends no data for 3 minutes (`upstreamStallTimeout`)
+- The server `timeout_in_s` write limit cut off streamed downloads that take longer than that in total; it is now extended with every chunk that is sent to the requester
+
+### Changed
+
+- Cache misses are now streamed to the requester while the file is downloaded from upstream and cached, instead of the requester waiting for the complete download (multi-GB files started flowing only after minutes, with clients like `wget` showing "awaiting response..."). Range and HEAD requests still wait for the complete file. Requests that arrive for the same URL during the download still wait and are then served from the cache
+- If the upstream fails after the response has started, the connection to the requester is aborted so the transfer fails instead of ending as a seemingly complete, truncated download. A failure before the first byte still returns `502`
+- The download continues and is cached if the requester disconnects midway
+- Downloads are written to `<cachefile>.part` and renamed once complete; unfinished `.part` files are ignored when the cache is indexed at startup
+
 ## [v0.5] - 2026-10-30
 
 ### Added

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -570,18 +571,19 @@ func TestNegativeCacheRuleOverridesTTL(t *testing.T) {
 	}
 }
 
-// TestTruncatedUpstreamDownloadReturns502 verifies that an upstream that
-// announces more bytes than it sends yields a 502 (not an empty 200) and that
+// TestUpstreamFailsBeforeFirstByteReturns502 verifies that an upstream that
+// announces a body but sends none yields a 502 (not an empty 200) and that
 // no partial file is left behind to be served as a cache hit later.
-func TestTruncatedUpstreamDownloadReturns502(t *testing.T) {
+func TestUpstreamFailsBeforeFirstByteReturns502(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "1000")
-		w.Write([]byte("only a part"))
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
 		// returning with fewer bytes than announced makes the server drop the connection
 	}))
 	defer backend.Close()
 
-	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/truncated.bin"
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/no-bytes.bin"
 	w := httptest.NewRecorder()
 	handleGet(w, httptest.NewRequest("GET", "/"+hostAndPath, nil))
 	if w.Code != http.StatusBadGateway {
@@ -590,7 +592,193 @@ func TestTruncatedUpstreamDownloadReturns502(t *testing.T) {
 	if got := w.Header().Get("X-Pkgproxy-Error"); got != "upstream-download-failed" {
 		t.Errorf("X-Pkgproxy-Error: got %q", got)
 	}
-	if _, err := os.Stat(cachePath("http://" + hostAndPath)); err == nil {
-		t.Error("partial cache file was left on disk")
+	assertNoCacheFile(t, "http://"+hostAndPath)
+}
+
+func assertNoCacheFile(t *testing.T, rawURL string) {
+	t.Helper()
+	for _, suffix := range []string{"", ".part"} {
+		if _, err := os.Stat(cachePath(rawURL) + suffix); err == nil {
+			t.Errorf("cache file %q was left on disk", cachePath(rawURL)+suffix)
+		}
 	}
+}
+
+// TestStreamsToClientWhileCaching verifies that the first chunk reaches the
+// client while the upstream download is still running, that the complete file
+// is cached afterwards and that the next request is a cache hit.
+func TestStreamsToClientWhileCaching(t *testing.T) {
+	release := make(chan struct{})
+	var backendCalls atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendCalls.Add(1)
+		w.Header().Set("Content-Length", "10")
+		w.Write([]byte("01234"))
+		w.(http.Flusher).Flush()
+		<-release
+		w.Write([]byte("56789"))
+	}))
+	defer backend.Close()
+	front := httptest.NewServer(http.HandlerFunc(handleGet))
+	defer front.Close()
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/stream.bin"
+	resp, err := http.Get(front.URL + "/" + hostAndPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.ContentLength != 10 {
+		t.Errorf("Content-Length: want 10, got %d", resp.ContentLength)
+	}
+	// the upstream is still blocked, so this only works if we stream
+	first := make([]byte, 5)
+	if _, err := io.ReadFull(resp.Body, first); err != nil || string(first) != "01234" {
+		t.Fatalf("first chunk before upstream finished: got %q, err %v", first, err)
+	}
+	close(release)
+	rest, err := io.ReadAll(resp.Body)
+	if err != nil || string(rest) != "56789" {
+		t.Fatalf("rest of body: got %q, err %v", rest, err)
+	}
+
+	data, err := os.ReadFile(cachePath("http://" + hostAndPath))
+	if err != nil || string(data) != "0123456789" {
+		t.Fatalf("cache file: got %q, err %v", data, err)
+	}
+	if _, err := os.Stat(cachePath("http://"+hostAndPath) + ".part"); err == nil {
+		t.Error(".part file still present after a complete download")
+	}
+
+	resp2, err := http.Get(front.URL + "/" + hostAndPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	body2, _ := io.ReadAll(resp2.Body)
+	if string(body2) != "0123456789" {
+		t.Errorf("second request body: got %q", body2)
+	}
+	if n := backendCalls.Load(); n != 1 {
+		t.Errorf("want 1 upstream request, got %d", n)
+	}
+}
+
+// TestStreamedDownloadFailingMidwayAbortsClient verifies that when the
+// upstream breaks after the response was already started, the client sees a
+// failed transfer instead of a clean, truncated 200 and nothing is cached.
+func TestStreamedDownloadFailingMidwayAbortsClient(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.Write([]byte("only a part"))
+	}))
+	defer backend.Close()
+	front := httptest.NewServer(http.HandlerFunc(handleGet))
+	defer front.Close()
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/midway.bin"
+	resp, err := http.Get(front.URL + "/" + hostAndPath)
+	if err == nil {
+		defer resp.Body.Close()
+		if _, err = io.ReadAll(resp.Body); err == nil {
+			t.Fatal("client read a truncated download without an error")
+		}
+	}
+	assertNoCacheFile(t, "http://"+hostAndPath)
+}
+
+// TestStreamKeepsCachingWhenClientDisconnects verifies that the download is
+// completed and cached even if the requester goes away midway.
+func TestStreamKeepsCachingWhenClientDisconnects(t *testing.T) {
+	release := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "10")
+		w.Write([]byte("01234"))
+		w.(http.Flusher).Flush()
+		<-release
+		w.Write([]byte("56789"))
+	}))
+	defer backend.Close()
+	front := httptest.NewServer(http.HandlerFunc(handleGet))
+	defer front.Close()
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/disconnect.bin"
+	resp, err := http.Get(front.URL + "/" + hostAndPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadFull(resp.Body, make([]byte, 5))
+	resp.Body.Close()
+	front.CloseClientConnections()
+	close(release)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(cachePath("http://" + hostAndPath))
+		if err == nil && string(data) == "0123456789" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("download was not completed in the cache: got %q, err %v", data, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestSlowDownloadIsNotCutOffByTotalTimeout verifies that a download taking
+// longer than the stall timeout in total succeeds as long as data keeps
+// flowing (the old 3 minute client timeout cut off every slow large download).
+func TestSlowDownloadIsNotCutOffByTotalTimeout(t *testing.T) {
+	orig := upstreamStallTimeout
+	upstreamStallTimeout = 300 * time.Millisecond
+	defer func() { upstreamStallTimeout = orig }()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for i := 0; i < 10; i++ { // 10 x 100ms = 1s total, > 3x the stall timeout
+			w.Write([]byte("0123456789"))
+			w.(http.Flusher).Flush()
+			time.Sleep(100 * time.Millisecond)
+		}
+	}))
+	defer backend.Close()
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/slow.bin"
+	w := httptest.NewRecorder()
+	handleGet(w, httptest.NewRequest("GET", "/"+hostAndPath, nil))
+	if w.Code != http.StatusOK || w.Body.Len() != 100 {
+		t.Fatalf("want 200 with 100 bytes, got %d with %d bytes", w.Code, w.Body.Len())
+	}
+	if data, err := os.ReadFile(cachePath("http://" + hostAndPath)); err != nil || len(data) != 100 {
+		t.Errorf("cache file: %d bytes, err %v", len(data), err)
+	}
+}
+
+// TestStalledUpstreamIsAborted verifies that an upstream that stops sending
+// data is aborted after the stall timeout and nothing is cached.
+func TestStalledUpstreamIsAborted(t *testing.T) {
+	orig := upstreamStallTimeout
+	upstreamStallTimeout = 300 * time.Millisecond
+	defer func() { upstreamStallTimeout = orig }()
+
+	done := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-done
+	}))
+	defer backend.Close()
+	defer close(done)
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/stalled.bin"
+	start := time.Now()
+	w := httptest.NewRecorder()
+	handleGet(w, httptest.NewRequest("GET", "/"+hostAndPath, nil))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("want 502, got %d", w.Code)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("stalled upstream was not aborted in time: %s", d)
+	}
+	assertNoCacheFile(t, "http://"+hostAndPath)
 }
