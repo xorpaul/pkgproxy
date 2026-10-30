@@ -642,10 +642,8 @@ func TestStreamsToClientWhileCaching(t *testing.T) {
 		t.Fatalf("rest of body: got %q, err %v", rest, err)
 	}
 
-	data, err := os.ReadFile(cachePath("http://" + hostAndPath))
-	if err != nil || string(data) != "0123456789" {
-		t.Fatalf("cache file: got %q, err %v", data, err)
-	}
+	// the client has all bytes before the handler renamed the .part file
+	waitForCacheContent(t, "http://"+hostAndPath, "0123456789")
 	if _, err := os.Stat(cachePath("http://"+hostAndPath) + ".part"); err == nil {
 		t.Error(".part file still present after a complete download")
 	}
@@ -712,16 +710,24 @@ func TestStreamKeepsCachingWhenClientDisconnects(t *testing.T) {
 	front.CloseClientConnections()
 	close(release)
 
+	waitForCacheContent(t, "http://"+hostAndPath, "0123456789")
+}
+
+// waitForCacheContent waits until the cache file of rawURL has the wanted
+// content. A streamed client receives the last byte before the handler has
+// renamed the finished .part file to the cache file.
+func waitForCacheContent(t *testing.T, rawURL, want string) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		data, err := os.ReadFile(cachePath("http://" + hostAndPath))
-		if err == nil && string(data) == "0123456789" {
-			break
+		data, err := os.ReadFile(cachePath(rawURL))
+		if err == nil && string(data) == want {
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("download was not completed in the cache: got %q, err %v", data, err)
+			t.Fatalf("cache file of %s: want %q, got %q, err %v", rawURL, want, data, err)
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
