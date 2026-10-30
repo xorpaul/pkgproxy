@@ -389,3 +389,54 @@ func TestConditionalGet200UpdatesCache(t *testing.T) {
 		t.Errorf("meta ETag after update: want %q, got %q", etag2, meta.ETag)
 	}
 }
+
+// TestCachePutUnknownContentLengthRespectsMemoryLimit verifies that the
+// in-memory cache decision is based on the bytes actually written and not on
+// the declared Content-Length, which is -1 for chunked upstream responses.
+func TestCachePutUnknownContentLengthRespectsMemoryLimit(t *testing.T) {
+	origMax := config.MaxCacheItemSize
+	defer func() { config.MaxCacheItemSize = origMax }()
+
+	const body = "0123456789"
+	for _, tc := range []struct {
+		name         string
+		maxMB        int64
+		bodySize     int
+		wantInMemory bool
+	}{
+		{"limit-0-disables-memory", 0, len(body), false},
+		{"limit-1MB-body-larger", 1, 1024*1024 + 1, false},
+		{"limit-1MB-body-smaller", 1, len(body), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config.MaxCacheItemSize = tc.maxMB
+			content := strings.Repeat("x", tc.bodySize)
+			var reader io.Reader = strings.NewReader(content)
+			rawURL := "http://unknown-length.example.com/" + tc.name
+
+			if err := cache.put(rawURL, &reader, -1); err != nil {
+				t.Fatalf("cache.put: %v", err)
+			}
+
+			data, err := os.ReadFile(cachePath(rawURL))
+			if err != nil || len(data) != tc.bodySize {
+				t.Fatalf("disk copy: want %d bytes, got %d (err %v)", tc.bodySize, len(data), err)
+			}
+			cache.mutex.Lock()
+			item := cache.cacheMemoryItems[rawURL]
+			cache.mutex.Unlock()
+			if inMemory := item.content != nil; inMemory != tc.wantInMemory {
+				t.Errorf("in-memory: want %v, got %v", tc.wantInMemory, inMemory)
+			}
+		})
+	}
+}
+
+func TestFormatSpeed(t *testing.T) {
+	if got, want := formatSpeed(10_000_000, 2*time.Second), "5.00 MB/s, 40.0 Mbit/s"; got != want {
+		t.Errorf("formatSpeed: want %q, got %q", want, got)
+	}
+	if got := formatSpeed(1, 0); got != "n/a" {
+		t.Errorf("zero duration: want n/a, got %q", got)
+	}
+}

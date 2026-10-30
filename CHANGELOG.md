@@ -1,5 +1,22 @@
 # Changelog
 
+## [v0.4] - 2026-10-30
+
+### Added
+
+- Log the effective upstream download speed (MB/s and Mbit/s) for every item fetched from upstream (`UPSTREAM_DOWNLOAD` log line)
+
+### Fixed
+
+- Downloads without a `Content-Length` (chunked upstream responses, `contentLength == -1`) were always put into the in-memory cache, even with `max_cache_item_size_in_mb: 0`, which ran multi-GB files out of memory and crashed the service. The decision is now based on the bytes actually written, and `max_cache_item_size_in_mb: 0` never buffers in memory
+- A download that failed midway (upstream cut the connection or sent fewer bytes than announced) was answered with the upstream's `200` and an empty or truncated body. The proxy now answers `502` with `X-Pkgproxy-Error: upstream-download-failed` and removes the partial cache file so it is never served as a cache hit
+- The in-memory cache debug log printed the limit in bytes under the label `max_cache_item_size_in_mb`
+
+### Changed
+
+- Updated vendor dependencies: `prometheus/client_golang` v1.24.1 → v1.25.0, `prometheus/common` v0.71.0 → v0.72.1, `gookit/color` v1.6.1 → v1.6.3, `mattn/go-colorable` v0.1.15 → v0.1.16, `xo/terminfo` v1.0.0 → v1.2.0, `golang.org/x/sys` v0.48.0 → v0.49.0, `golang.org/x/term` v0.46.0 → v0.47.0
+- `/metrics` responses now carry a `Vary: Accept, Accept-Encoding` header (from `client_golang` v1.25.0)
+
 ## [v0.3]
 
 ### Changed

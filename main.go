@@ -543,6 +543,7 @@ func GetRemote(requestedURL string) (*http.Response, error) {
 		olo.Debug("GETing %s took %.5fs", requestedURL, duration)
 		err = cache.put(requestedURL, &reader, response.ContentLength)
 		if err != nil {
+			response.Body.Close()
 			return response, err
 		}
 		// Persist ETag / Last-Modified so future TTL expiries can use

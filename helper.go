@@ -13,7 +13,14 @@ import (
 
 func handleError(response *http.Response, err error, w http.ResponseWriter) {
 	olo.Error("%s", err.Error())
-	if response != nil {
+	if response != nil && response.StatusCode < 400 {
+		// The upstream answered fine but fetching or caching the body failed
+		// (e.g. connection cut mid-download). Never relay its 2xx/3xx status
+		// with an empty or truncated body.
+		w.Header().Set("X-Pkgproxy-Error", "upstream-download-failed")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprintf(w, "pkgproxy: downloading the requested file from the remote failed\n\nError: %s\n", err.Error())
+	} else if response != nil {
 		w.Header().Set("X-Pkgproxy-Error", fmt.Sprintf("remote returned HTTP %d", response.StatusCode))
 		w.WriteHeader(response.StatusCode)
 		bodyBytes, readErr := io.ReadAll(response.Body)

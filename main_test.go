@@ -569,3 +569,28 @@ func TestNegativeCacheRuleOverridesTTL(t *testing.T) {
 		t.Errorf("after rule TTL expiry: want 2 upstream hits, got %d", hitCount)
 	}
 }
+
+// TestTruncatedUpstreamDownloadReturns502 verifies that an upstream that
+// announces more bytes than it sends yields a 502 (not an empty 200) and that
+// no partial file is left behind to be served as a cache hit later.
+func TestTruncatedUpstreamDownloadReturns502(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.Write([]byte("only a part"))
+		// returning with fewer bytes than announced makes the server drop the connection
+	}))
+	defer backend.Close()
+
+	hostAndPath := strings.TrimPrefix(backend.URL, "http://") + "/truncated.bin"
+	w := httptest.NewRecorder()
+	handleGet(w, httptest.NewRequest("GET", "/"+hostAndPath, nil))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("want 502, got %d", w.Code)
+	}
+	if got := w.Header().Get("X-Pkgproxy-Error"); got != "upstream-download-failed" {
+		t.Errorf("X-Pkgproxy-Error: got %q", got)
+	}
+	if _, err := os.Stat(cachePath("http://" + hostAndPath)); err == nil {
+		t.Error("partial cache file was left on disk")
+	}
+}
